@@ -1,0 +1,791 @@
+#!/usr/bin/env bash
+
+# tkt: a ticket tracker over fossil, with a mutable description beside an append-only comment log.
+set -eo pipefail
+
+TKT_VERSION=0.1.0
+FIELDS='tags blockers description'
+GUEST=hjr
+SKIN=xekri
+MENU="Tickets /ticket r {} Light ?skin=default * {} Dark ?skin=$SKIN * {} Skins /skins * {} Admin /setup {a s} desktoponly Logout /logout L desktoponly Login /login !L desktoponly"
+COLS="substr(tkt_uuid,1,10) || ' | ' || coalesce(nullif(status,''),'-') || ' | ' || coalesce(nullif(severity,''),'-') || ' | ' || coalesce(nullif(trim(tags),''),'-') || ' | ' || coalesce(nullif(title,''),'(untitled)')"
+
+# color only on a terminal, and never when either no-color variable is set or the terminal is dumb
+colorful() { [ -z "${NO_COLOR:-}${NOCOLOR:-}" ] && [ "${TERM:-}" != dumb ] && [ -t "$1" ]; }
+if colorful 2; then E_RED=$'\033[31m' E_DIM=$'\033[2m' E_OFF=$'\033[0m'; fi
+if colorful 1; then PAINT=1; fi
+
+die() { printf '%stkt:%s %s\n' "$E_RED" "$E_OFF" "$*" >&2; exit 1; }
+
+note() { printf '%stkt:%s %s\n' "$E_DIM" "$E_OFF" "$*" >&2; }
+
+# on a terminal, highlight ids, status, and severity in rows, and headings in a shown ticket
+paint() {
+  if [ -z "$PAINT" ]; then cat; return; fi
+  local b=$'\033[1m' d=$'\033[2m' r=$'\033[31m' g=$'\033[32m' y=$'\033[33m' c=$'\033[36m' o=$'\033[0m'
+  sed -E \
+    -e "s/^([0-9a-f]{10}) \\| /${b}\\1${o} | /" \
+    -e "s/ \\| Open \\| / | ${g}Open${o} | /" \
+    -e "s/ \\| WIP \\| / | ${y}WIP${o} | /" \
+    -e "s/ \\| Closed \\| / | ${d}Closed${o} | /" \
+    -e "s/ \\| Critical \\| / | ${r}Critical${o} | /" \
+    -e "s/^(# .*)$/${b}\\1${o}/" \
+    -e "s/^(## .*)$/${c}\\1${o}/" \
+    -e "s/^---$/${d}---${o}/"
+}
+
+usage() {
+  cat <<'EOF'
+tkt: a ticket tracker over fossil, with a mutable body.
+
+  tkt init [--adopt]                    create or migrate the tracker
+  tkt new title=... [field=value...]    file a ticket, stdin is the description
+  tkt show <id>                         one ticket as markdown
+  tkt list [status=...] [tag=...]       markdown table, Open and WIP by default
+  tkt search <text>                     substring across titles, descriptions, comments
+  tkt edit <id>                         replace the description from stdin or $EDITOR
+  tkt comment <id>                      add a comment from stdin or $EDITOR
+  tkt tag <id> <tag...>|--clear         replace the tag set
+  tkt block <id> <id...>|--clear        replace what the ticket waits on
+  tkt set <id> <field> [value...]       write one field, value from args or stdin
+  tkt close <id> [resolution=...]       close, stdin is the closing comment
+  tkt serve [port=...]                  web ui in the foreground, replacing any running one
+  tkt stop                              stop the server started by serve
+  tkt status                            print the server url and pid, or fail
+  tkt sql <query> | --schema            read-only sql, as markdown; stdin works too
+  tkt skill [install [--project]]       print or install the Claude Code skill
+  tkt run <fossil args...>              any fossil command against the tracker
+  tkt help | version
+
+Fields for new: title type status severity priority subsystem tags foundin.
+Ids are uuid prefixes.  The tracker is $TKT_DB, else the nearest .tkt.fossil here or
+above; init creates one at the git root, or here outside git.
+EOF
+}
+
+# the nearest tracker at or above here, else a new one at the git root, else here
+locate() {
+  if [ -n "${TKT_DB:-}" ]; then
+    case "$TKT_DB" in /*) REPO=$TKT_DB ;; *) REPO=$PWD/$TKT_DB ;; esac
+    return
+  fi
+  local root=$PWD
+  while :; do
+    if [ -f "$root/.tkt.fossil" ]; then REPO=$root/.tkt.fossil; return; fi
+    [ "$root" != / ] || break
+    root=$(dirname "$root")
+  done
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$PWD
+  REPO=$root/.tkt.fossil
+  if [ ! -f "$REPO" ] && [ -f "$root/.fossil.db" ] && owned "$root/.fossil.db"; then
+    die "found a tracker under the old name $root/.fossil.db; rename it to .tkt.fossil or set TKT_DB"
+  fi
+}
+
+fx() { fossil "$@" -R "$REPO"; }
+
+sqlq() { { printf '.mode list\n.headers off\n'; printf '%s\n' "$@"; } | fossil sql -R "$REPO"; }
+
+# a tkt tracker carries the version row, or predates it but has the blockers column only this schema adds
+owned() {
+  local REPO=$1 n
+  n=$(sqlq "select (select count(*) from config where name='tkt-version') + (select count(*) from config where name='ticket-table' and instr(cast(value as text),'blockers TEXT') > 0);" 2>/dev/null) || return 1
+  [ "${n:-0}" -gt 0 ]
+}
+
+lit() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
+
+need() {
+  [ -f "$REPO" ] || die "no tracker at $REPO, run: tkt init"
+  local have f
+  have=" $(sqlq "select group_concat(name,' ') from pragma_table_info('ticket');") "
+  for f in $FIELDS; do
+    case "$have" in *" $f "*) ;; *) die "tracker schema predates the $f field, run: tkt init" ;; esac
+  done
+}
+
+# the canonical ten-char id behind a prefix, failing unless exactly one ticket matches
+resolve() {
+  local hits
+  [ -n "$1" ] || die 'a ticket id is required'
+  case "$1" in *[!0123456789abcdef]*) die "not a ticket id: $1" ;; esac
+  hits=$(sqlq "select substr(tkt_uuid,1,10) from ticket where tkt_uuid like '$1%';")
+  set -- "$1" $hits
+  [ $# -eq 2 ] || die "$1 matches no single ticket"
+  printf '%s' "$2"
+}
+
+# a single dash-word would be taken by fossil as one of its own options
+safe() {
+  local v
+  for v in "$@"; do
+    case "$v" in -*[!\ \	]*) case "$v" in *[\ \	]*) ;; *) die "value looks like a fossil option: $v" ;; esac ;; esac
+  done
+}
+
+# a bracketed hash renders flat under markdown; this is link format 8, where the url becomes the display text
+xref() { sed -E 's/\[([0-9a-f]{6,40})\]/[](\1)/g'; }
+
+# piped stdin first, then the editor when the caller allows it, else nothing
+slurp() {
+  if [ ! -t 0 ]; then
+    xref
+  elif [ "$1" = editor ] && [ -n "${VISUAL:-${EDITOR:-}}" ]; then
+    local tmp ed=${VISUAL:-$EDITOR}
+    tmp=$(mktemp)
+    sh -c "$ed \"\$1\"" "$ed" "$tmp" </dev/tty >/dev/tty
+    xref <"$tmp"
+    rm -f "$tmp"
+  fi
+}
+
+# key=value arguments into kv_<key> vars; an unknown key fails rather than dropping in silence
+kv() {
+  local known=" $1 " arg k
+  shift
+  for arg in "$@"; do
+    case "$arg" in *=*) ;; *) die "unexpected argument: $arg (expected key=value)" ;; esac
+    k=${arg%%=*}
+    case "$known" in *" $k "*) ;; *) die "unknown field: $k (known: $(echo $known))" ;; esac
+    printf -v "kv_$k" '%s' "${arg#*=}"
+  done
+}
+
+schema() {
+  cat <<'EOF'
+CREATE TABLE ticket(
+  tkt_id INTEGER PRIMARY KEY,
+  tkt_uuid TEXT UNIQUE,
+  tkt_mtime DATE,
+  tkt_ctime DATE,
+  type TEXT,
+  status TEXT,
+  subsystem TEXT,
+  priority TEXT,
+  severity TEXT,
+  foundin TEXT,
+  private_contact TEXT,
+  resolution TEXT,
+  title TEXT,
+  tags TEXT,
+  blockers TEXT,
+  description TEXT,
+  comment TEXT
+);
+CREATE TABLE ticketchng(
+  tkt_id INTEGER REFERENCES ticket,
+  tkt_rid INTEGER REFERENCES blob,
+  tkt_mtime DATE,
+  login TEXT,
+  username TEXT,
+  mimetype TEXT,
+  icomment TEXT
+);
+CREATE INDEX ticketchng_idx1 ON ticketchng(tkt_id, tkt_mtime);
+EOF
+}
+
+view() {
+  cat <<'EOF'
+<th1>
+html "<h2>[htmlize $title]</h2>\n"
+</th1>
+<table class="label-value">
+<tr><td class="tktDspLabel">Ticket:</td><td class="tktDspValue">$<tkt_uuid></td></tr>
+<tr><td class="tktDspLabel">State:</td><td class="tktDspValue">$<status> &middot; $<type> &middot; $<severity></td></tr>
+<tr><td class="tktDspLabel">Subsystem:</td><td class="tktDspValue">$<subsystem></td></tr>
+<tr><td class="tktDspLabel">Tags:</td><td class="tktDspValue">$<tags></td></tr>
+<tr><td class="tktDspLabel">Blocked by:</td><td class="tktDspValue">$<blockers></td></tr>
+<tr><td class="tktDspLabel">Found in:</td><td class="tktDspValue">$<foundin></td></tr>
+<tr><td class="tktDspLabel">Resolution:</td><td class="tktDspValue">$<resolution></td></tr>
+</table>
+<th1>
+html "<p class=\"tktActions\">"
+if {$status eq "Closed"} {
+  html "<a class=\"button\" href=\"$home/tktedit/$tkt_uuid?status=Open&amp;resolution=Open\">Reopen</a>"
+} else {
+  html "<a class=\"button\" href=\"$home/tktedit/$tkt_uuid?status=Closed&amp;resolution=Fixed\">Close</a>"
+}
+html " <a class=\"button\" href=\"$home/tktedit/$tkt_uuid\">Edit or comment</a></p>\n"
+if {[info exists description] && [string length $description] > 0} {
+  html "<div class=\"section\">Description</div>\n"
+  html "<div class=\"tktDspValue\">\n"
+  html [lindex [markdown $description] 1]
+  html "</div>\n"
+}
+query {SELECT datetime(tkt_mtime) AS xdate, coalesce(login,'') AS xwho,
+              coalesce(icomment,'') AS xcmt
+         FROM ticketchng
+        WHERE tkt_id=$tkt_id AND length(coalesce(icomment,'')) > 0
+        ORDER BY tkt_mtime} {
+  html "<div class=\"section\">Comment by $xwho on $xdate</div>\n"
+  html "<div class=\"tktDspValue\">\n"
+  html [lindex [markdown $xcmt] 1]
+  html "</div>\n"
+}
+</th1>
+EOF
+}
+
+newpage() {
+  cat <<'EOF'
+<th1>
+  if {[info exists submit]} {
+    set status Open
+    submit_ticket
+  }
+</th1>
+<h1>New ticket</h1>
+<table cellpadding="5">
+<tr><td class="tktDspLabel">Title:</td><td>
+<input type="text" name="title" size="70" value="$<title>">
+</td></tr>
+<tr><td class="tktDspLabel">Type:</td><td><th1>combobox type $type_choices 1</th1></td></tr>
+<tr><td class="tktDspLabel">Severity:</td><td><th1>combobox severity $severity_choices 1</th1></td></tr>
+<tr><td class="tktDspLabel">Priority:</td><td><th1>combobox priority $priority_choices 1</th1></td></tr>
+<tr><td class="tktDspLabel">Subsystem:</td><td><th1>combobox subsystem $subsystem_choices 1</th1></td></tr>
+<tr><td class="tktDspLabel">Tags:</td><td>
+<input type="text" name="tags" size="50" value="$<tags>"> space-separated
+</td></tr>
+<tr><td class="tktDspLabel">Found in:</td><td>
+<input type="text" name="foundin" size="50" value="$<foundin>">
+</td></tr>
+<tr><td colspan="2">
+Description, in markdown: symptom, repro, cause, and what is owed.<br>
+<textarea name="description" cols="80" rows="16" wrap="virtual" class="wikiedit">$<description></textarea>
+</td></tr>
+<tr><td colspan="2">
+<input type="submit" name="submit" value="Submit">
+<input type="submit" name="cancel" value="Cancel">
+</td></tr>
+</table>
+EOF
+}
+
+editpage() {
+  cat <<'EOF'
+<th1>
+  if {![info exists icomment]} {set icomment {}}
+  if {![info exists username]} {set username $login}
+  if {[info exists submit]} {
+    set mimetype text/x-markdown
+    submit_ticket
+  }
+</th1>
+<table cellpadding="5">
+<tr><td class="tktDspLabel">Title:</td><td>
+<input type="text" name="title" size="70" value="$<title>">
+</td></tr>
+<tr><td class="tktDspLabel">Status:</td><td><th1>combobox status $status_choices 1</th1></td></tr>
+<tr><td class="tktDspLabel">Resolution:</td><td><th1>combobox resolution $resolution_choices 1</th1></td></tr>
+<tr><td class="tktDspLabel">Type:</td><td><th1>combobox type $type_choices 1</th1></td></tr>
+<tr><td class="tktDspLabel">Severity:</td><td><th1>combobox severity $severity_choices 1</th1></td></tr>
+<tr><td class="tktDspLabel">Priority:</td><td><th1>combobox priority $priority_choices 1</th1></td></tr>
+<tr><td class="tktDspLabel">Subsystem:</td><td><th1>combobox subsystem $subsystem_choices 1</th1></td></tr>
+<tr><td class="tktDspLabel">Tags:</td><td>
+<input type="text" name="tags" size="50" value="$<tags>"> space-separated
+</td></tr>
+<tr><td class="tktDspLabel">Found in:</td><td>
+<input type="text" name="foundin" size="50" value="$<foundin>">
+</td></tr>
+<tr><td colspan="2">
+Comment, in markdown, appended to the log:<br>
+<textarea name="icomment" cols="80" rows="8" wrap="virtual" class="wikiedit">$<icomment></textarea>
+<input type="hidden" name="username" value="$<username>">
+</td></tr>
+<tr><td colspan="2">
+Description, in markdown, replaced in place:<br>
+<textarea name="description" cols="80" rows="16" wrap="virtual" class="wikiedit">$<description></textarea>
+</td></tr>
+<tr><td colspan="2">
+<input type="submit" name="submit" value="Submit">
+<input type="submit" name="cancel" value="Cancel">
+</td></tr>
+</table>
+EOF
+}
+
+verb_init() {
+  command -v fossil >/dev/null || die 'fossil not found; see https://fossil-scm.org for install instructions'
+  local tmp adopt=
+  case "$1" in
+    '') ;;
+    --adopt) adopt=1 ;;
+    *) die "unexpected argument: $1 (only --adopt)" ;;
+  esac
+  if [ ! -f "$REPO" ]; then
+    fossil init --admin-user "${TKT_USER:-${USER:-fossil}}" --project-name "$(basename "$(dirname "$REPO")")" "$REPO" >&2
+  elif [ -z "$adopt" ] && ! owned "$REPO"; then
+    die "$REPO is not a tkt tracker; init would replace its ticket schema, ticket view, and main menu, and give anonymous users read access. Rerun with --adopt to do that anyway"
+  fi
+  tmp=$(mktemp -d)
+  schema >"$tmp/schema"
+  view >"$tmp/view"
+  newpage >"$tmp/new"
+  editpage >"$tmp/edit"
+  sqlq "replace into config(name,value,mtime) values('ticket-table',cast(readfile('$tmp/schema') as text),strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('ticket-viewpage',cast(readfile('$tmp/view') as text),strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('ticket-newpage',cast(readfile('$tmp/new') as text),strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('ticket-editpage',cast(readfile('$tmp/edit') as text),strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('mainmenu',$(lit "$MENU"),strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('index-page','/ticket',strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('default-skin','$SKIN',strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('tkt-version','$TKT_VERSION',strftime('%s','now'));"
+  rm -rf "$tmp"
+  fx user capabilities nobody "$GUEST" >&2
+  fx user capabilities anonymous "$GUEST" >&2
+  fossil rebuild "$REPO" >&2
+  note "ready at $REPO"
+}
+
+verb_new() {
+  need
+  kv 'title type status severity priority subsystem tags foundin' "$@"
+  [ -n "$kv_title" ] || die 'title is required'
+  local body foundin
+  body=$(slurp)
+  foundin=${kv_foundin:-$(git rev-parse -q --verify HEAD 2>/dev/null || true)}
+  safe "$kv_title" "$kv_type" "$kv_status" "$kv_severity" "$kv_priority" "$kv_subsystem" "$kv_tags" "$foundin" "$body"
+  fx ticket add \
+    title "$kv_title" \
+    type "${kv_type:-Code_Defect}" \
+    status "${kv_status:-Open}" \
+    severity "${kv_severity:-Important}" \
+    priority "${kv_priority:-Medium}" \
+    subsystem "$kv_subsystem" \
+    tags "$kv_tags" \
+    foundin "$foundin" \
+    mimetype text/x-markdown \
+    description "$body"
+}
+
+verb_edit() {
+  need
+  local id body
+  id=$(resolve "$1")
+  body=$(slurp editor)
+  [ -n "$body" ] || die 'nothing on stdin'
+  safe "$body"
+  fx ticket set "$id" description "$body" mimetype text/x-markdown
+}
+
+verb_comment() {
+  need
+  local id body
+  id=$(resolve "$1")
+  body=$(slurp editor)
+  [ -n "$body" ] || die 'nothing on stdin'
+  safe "$body"
+  fx ticket set "$id" +icomment "$body" mimetype text/x-markdown
+}
+
+# fossil drops an empty field value, so clearing writes a space
+verb_tag() {
+  need
+  local id tags
+  id=$(resolve "$1")
+  shift
+  if [ "$1" = --clear ]; then
+    tags=' '
+  else
+    if [ $# -gt 0 ]; then tags="$*"; else tags=$(slurp); fi
+    tags=$(echo $tags)
+    [ -n "$tags" ] || die 'no tags given; use --clear to empty the set'
+  fi
+  safe $tags
+  fx ticket set "$id" tags "$tags"
+}
+
+verb_block() {
+  need
+  local id ids='' tok hit
+  id=$(resolve "$1")
+  shift
+  if [ "$1" = --clear ]; then
+    ids=' '
+  else
+    [ $# -gt 0 ] || set -- $(slurp)
+    [ $# -gt 0 ] || die 'no ids given; use --clear to empty the set'
+    for tok in "$@"; do
+      hit=$(resolve "$tok")
+      [ "$hit" != "$id" ] || die 'a ticket cannot block itself'
+      ids="$ids $hit"
+    done
+    ids=${ids# }
+  fi
+  fx ticket set "$id" blockers "$ids"
+}
+
+verb_set() {
+  need
+  local id field value have
+  id=$(resolve "$1")
+  field=$2
+  [ -n "$field" ] || die 'usage: tkt set <id> <field> [value...]'
+  shift 2
+  case "$field" in
+    icomment|+icomment|comment) die 'use: tkt comment' ;;
+    description) die 'use: tkt edit' ;;
+    tags) die 'use: tkt tag' ;;
+    blockers) die 'use: tkt block' ;;
+  esac
+  have=" $(sqlq "select group_concat(name,' ') from pragma_table_info('ticket');") "
+  case "$have" in *" $field "*) ;; *) die "unknown field: $field" ;; esac
+  if [ $# -gt 0 ]; then value="$*"; else value=$(slurp); fi
+  [ -n "$value" ] || die 'no value given'
+  safe "$value"
+  fx ticket set "$id" "$field" "$value"
+}
+
+verb_close() {
+  need
+  local id body
+  id=$(resolve "$1")
+  shift
+  kv resolution "$@"
+  body=$(slurp)
+  safe "$kv_resolution" "$body"
+  fx ticket set "$id" status Closed resolution "${kv_resolution:-Fixed}"
+  [ -z "$body" ] || fx ticket set "$id" +icomment "$body" mimetype text/x-markdown
+}
+
+verb_show() {
+  need
+  local id
+  id=$(resolve "$1")
+  local xb="'- ' || substr(b.tkt_uuid,1,10) || ' | ' || coalesce(nullif(b.status,''),'-') || ' | ' || coalesce(nullif(b.title,''),'(untitled)')"
+  local xs="'- ' || substr(s.tkt_uuid,1,10) || ' | ' || coalesce(nullif(s.status,''),'-') || ' | ' || coalesce(nullif(s.title,''),'(untitled)')"
+  sqlq \
+    "select '# ' || coalesce(nullif(title,''),'(untitled)') || char(10) || char(10) || $COLS || char(10) || char(10) || coalesce(nullif(trim(description),''),'(no description)') || coalesce((select group_concat(char(10) || char(10) || '---' || char(10) || char(10) || c.icomment, '') from ticketchng c where c.tkt_id=ticket.tkt_id and coalesce(c.icomment,'')!=''),'') from ticket where tkt_uuid like '$id%';" \
+    "select char(10) || '## Blocked by' || char(10) || char(10) || group_concat($xb, char(10)) from ticket t join ticket b on ' ' || coalesce(t.blockers,'') || ' ' like '% ' || substr(b.tkt_uuid,1,10) || ' %' where t.tkt_uuid like '$id%' having count(b.tkt_id) > 0;" \
+    "select char(10) || '## Blocks' || char(10) || char(10) || group_concat($xb, char(10)) from ticket t join ticket b on ' ' || coalesce(b.blockers,'') || ' ' like '% ' || substr(t.tkt_uuid,1,10) || ' %' where t.tkt_uuid like '$id%' having count(b.tkt_id) > 0;" \
+    "select char(10) || '## Referenced by' || char(10) || char(10) || group_concat(row, char(10)) from (select distinct $xs as row from ticket t join backlink bl on t.tkt_uuid like bl.target || '%' join ticketchng c on c.tkt_rid=bl.srcid join ticket s on s.tkt_id=c.tkt_id and s.tkt_id != t.tkt_id where bl.srctype=1 and t.tkt_uuid like '$id%') having count(*) > 0;" \
+    | paint
+}
+
+verb_list() {
+  need
+  kv 'status tag' "$@"
+  local want=${kv_status:-Open} filter
+  case "$want" in
+    all) filter='where 1=1' ;;
+    Open) filter="where status in ('Open','WIP')" ;;
+    *) filter="where status=$(lit "$want")" ;;
+  esac
+  [ -z "$kv_tag" ] || filter="$filter and ' '||coalesce(tags,'')||' ' like $(lit "% $kv_tag %")"
+  sqlq "select $COLS from ticket $filter order by tkt_mtime desc;" | paint
+}
+
+verb_search() {
+  need
+  [ $# -gt 0 ] || die 'usage: tkt search <text>'
+  local pat
+  pat=$(lit "%$*%")
+  sqlq "select $COLS from ticket where lower(coalesce(title,'') || ' ' || coalesce(description,'')) like lower($pat) or tkt_id in (select tkt_id from ticketchng where lower(coalesce(icomment,'')) like lower($pat)) order by tkt_mtime desc;" | paint
+}
+
+port_of() {
+  kv port "$@"
+  local at=${kv_port:-${TKT_PORT:-9080}}
+  case "$at" in ''|*[!0123456789]*) die "not a port: $at" ;; esac
+  printf '%s' "$at"
+}
+
+# the pid file holds a pid and port, trusted only while that pid is still this tracker's fossil server
+running() {
+  local pid port
+  [ -f "$REPO.pid" ] && read -r pid port <"$REPO.pid" || return 1
+  case "$pid" in ''|*[!0123456789]*) return 1 ;; esac
+  ps -p "$pid" -o command= 2>/dev/null | grep -qF -- "server $REPO" || return 1
+  printf '%s %s' "$pid" "$port"
+}
+
+halt() {
+  local pid port n=0
+  read -r pid port <<<"$(running)"
+  if [ -z "$pid" ]; then rm -f "$REPO.pid"; return 1; fi
+  kill "$pid"
+  while kill -0 "$pid" 2>/dev/null && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+  rm -f "$REPO.pid"
+  note "stopped the server on port $port (pid $pid)"
+}
+
+verb_serve() {
+  need
+  local at
+  at=$(port_of "$@")
+  halt || true
+  printf '%s %s\n' "$$" "$at" >"$REPO.pid"
+  printf 'http://localhost:%s/ticket\n' "$at"
+  note "serving $REPO in the foreground as pid $$; Ctrl-C or tkt stop ends it"
+  exec fossil server "$REPO" --port "$at" --localhost --localauth
+}
+
+verb_stop() {
+  halt || note "nothing serving $REPO"
+}
+
+verb_status() {
+  local pid port
+  read -r pid port <<<"$(running)"
+  if [ -z "$pid" ]; then note "nothing serving $REPO"; return 1; fi
+  printf 'http://localhost:%s/ticket\n' "$port"
+  note "serving $REPO as pid $pid"
+}
+
+schema_notes() {
+  cat <<'EOF'
+tkt sql runs read-only: it can query the tracker but never change it.
+
+ticket: one row per ticket, holding each field's current value
+  tkt_uuid     the full id; tkt shows its first ten characters
+  status       Open, WIP, or Closed
+  tags         space-separated words
+  blockers     space-separated ten-character ids of the tickets this one waits on
+  description  the current problem statement, in markdown
+  tkt_ctime, tkt_mtime   julian day numbers; datetime(tkt_mtime) gives a timestamp
+  An emptied tags or blockers field holds a single space, so test trim(tags) = ''.
+
+ticketchng: one row per change to a ticket
+  tkt_id       joins ticket.tkt_id
+  icomment     the comment that change added, in markdown; empty when it added none
+  login        who made the change
+
+backlink: references written as [](<uuid>) in ticket text
+  target       the referenced uuid or prefix
+  srcid        joins ticketchng.tkt_rid, the change whose text holds the reference
+  srctype      1 for ticket text
+
+Open tickets whose blockers are all closed:
+  select substr(t.tkt_uuid,1,10) as id, t.title from ticket t
+   where t.status in ('Open','WIP') and not exists (
+     select 1 from ticket b
+      where ' ' || coalesce(t.blockers,'') || ' ' like '% ' || substr(b.tkt_uuid,1,10) || ' %'
+        and b.status != 'Closed');
+
+Open tickets untouched for 30 days:
+  select substr(tkt_uuid,1,10) as id, title, date(tkt_mtime) as touched from ticket
+   where status != 'Closed' and tkt_mtime < julianday('now','-30 days');
+
+Columns:
+EOF
+  sqlq "select m.name || '.' || p.name || '  ' || p.type from sqlite_schema m join pragma_table_info(m.name) p where m.name in ('ticket','ticketchng','backlink') order by m.name, p.cid;"
+}
+
+# safe mode keeps the shell from writing files, running commands, or opening other databases
+readonly_sql() { fossil sql --readonly -safe -R "$REPO" "$@"; }
+
+verb_sql() {
+  need
+  printf 'select 1;\n' | readonly_sql >/dev/null 2>&1 || die "fossil sql --readonly -safe failed; tkt sql needs a fossil whose sqlite shell has safe mode"
+  if [ "$1" = --schema ]; then schema_notes; return; fi
+  if [ $# -eq 0 ] && [ -t 0 ]; then exec fossil sql --readonly -safe -R "$REPO"; fi
+  local q err rc=0
+  if [ $# -gt 0 ]; then q="$*"; else q=$(cat); fi
+  [ -n "$q" ] || die 'usage: tkt sql <query>, the query on stdin, or tkt sql --schema'
+  err=$(mktemp)
+  printf '%s\n' "$q" | readonly_sql -markdown -header -bail 2>"$err" || rc=$?
+  # fossil exits zero after a failed statement, so any error text is the failure signal
+  if [ -s "$err" ]; then cat "$err" >&2; rc=1; fi
+  rm -f "$err"
+  return $rc
+}
+
+# the Claude Code skill, which the test suite keeps identical to the copy under skills/tkt
+skill_md() {
+  cat <<'SKILL_MD'
+---
+name: tkt
+description: File, read, update, and close tickets in a project's fossil ticket tracker through the tkt command. Use when the human mentions tickets, the tracker, tkt, or .tkt.fossil, asks to file or record a bug or todo, asks what is open, or when work fixes, blocks, or relates to an existing ticket.
+allowed-tools: Bash(tkt:*)
+---
+
+# tkt
+
+`tkt` is a ticket tracker over fossil. A ticket is a **description** plus **comments**. The
+description is the current statement of the problem and is rewritten in place. Comments
+are an append-only log beside it. Both are markdown.
+
+Run `tkt help` for the full verb list. This skill covers how to use it well.
+
+## Before the first call
+
+```bash
+command -v tkt && tkt list
+```
+
+| Result | Action |
+| --- | --- |
+| `tkt` not found | Stop and give the human the install step from the tkt README. Do not fall back to raw `fossil` commands. |
+| `no tracker at ...` | Ask the human before running `tkt init`, since it creates a file in their repository. |
+| `schema predates the ... field` | Run `tkt init`. It is idempotent and only migrates. |
+| `found a tracker under the old name` | Give the human the rename it names. Do not rename the file yourself. |
+| `is not a tkt tracker` | Stop and report it. Never pass `--adopt` without the human's explicit yes for that repository. |
+
+## Commands
+
+Always pass bodies on stdin, never as an argument. Use a quoted heredoc: the quoted
+delimiter keeps backticks, dollars, and angle brackets literal.
+
+```bash
+tkt new title='foo explodes' tags='compiler oop' <<'EOF'
+## Symptom
+
+`make foo` exits 2 with `unbound variable: bar`.
+EOF
+```
+
+When a hook or permission rule blocks heredocs, or the body is long, write it to a draft
+file with the Write tool and pipe it. Move or delete the draft once it is filed.
+
+```bash
+cat /tmp/ticket-body.md | tkt new title='foo explodes'
+```
+
+`tkt new` prints the new uuid. Its first ten characters are the id to use afterwards.
+
+| Intent | Command |
+| --- | --- |
+| Read one ticket | `tkt show <id>` |
+| List open tickets | `tkt list`, or `tkt list status=all tag=<word>` |
+| Find a ticket | `tkt search <text>` |
+| Restate the problem | `tkt edit <id> <<'EOF'` ... |
+| Add to the record | `tkt comment <id> <<'EOF'` ... |
+| Replace tags | `tkt tag <id> compiler oop`, or `--clear` |
+| Declare what it waits on | `tkt block <id> <other-id>...`, or `--clear` |
+| Change one field | `tkt set <id> severity Critical` |
+| Close | `tkt close <id> <<'EOF'` ... |
+
+Optional fields for `new`: `type`, `status`, `severity`, `priority`, `subsystem`, `tags`,
+`foundin`. An unknown field name fails, so fix the spelling and rerun.
+
+Never use `tkt run` for a write that a verb covers, and never edit `.tkt.fossil` directly.
+`tkt run` is the human's escape hatch.
+
+## Questions the verbs don't answer
+
+Use `tkt sql` for any read-only question: what is ready to work, what went stale, counts
+by tag. It can't change anything, so it's always safe to run.
+
+- Run `tkt sql --schema` first. It explains the tables and gives two example queries.
+- Pass the query as an argument, or on stdin for anything longer than a line.
+- Never use `tkt run sql`. That is the human's unrestricted escape hatch.
+
+```bash
+tkt sql "select severity, count(*) as n from ticket where status != 'Closed' group by severity;"
+```
+
+## Search before filing
+
+Run `tkt search <key term>` before `tkt new`. When a ticket already covers the problem,
+comment on it or rewrite its description instead of filing a duplicate.
+
+## Ticket structure
+
+Someone acts on a ticket later without the context you have now, so write the destination,
+not the journey. Four sections carry almost every description:
+
+- **Symptom**: the real error text, quoted.
+- **Repro**: the shortest command that shows it.
+- **Cause**: where the defect lives, stated flatly.
+- **Result** or **Todo**: what was fixed and what test pins it, or what is still owed.
+
+Leave out what you tried first, what you ruled out, and commentary on tooling or process.
+Put that in a notes file, not in the ticket.
+
+## Edit or comment
+
+| Situation | Verb |
+| --- | --- |
+| The description is wrong or out of date | `tkt edit`: rewrite the whole description. The old text stays in fossil's history. |
+| New evidence, a status note, a partial fix | `tkt comment` |
+| Comments have pushed the ticket out of the four sections | `tkt edit` to fold them back in, not another comment |
+
+`tkt edit` replaces the description. Run `tkt show <id>` first and carry forward what
+still holds.
+
+## Cross-references
+
+- **See also**: write `[<uuid>]` in any description or comment. `tkt` rewrites it into a
+  link, and `tkt show` on the other ticket lists it under `Referenced by`. A code span such
+  as `` `<uuid>` `` does not link.
+- **Waits on**: use `tkt block` only when this ticket cannot proceed until the other one
+  closes. Record only the waits-on direction; `tkt show` derives the reverse.
+
+## Closing
+
+Close a ticket yourself only when all three hold:
+
+1. The fix is committed.
+2. A test pins it.
+3. You watched that test pass.
+
+The closing comment names the commit and the test:
+
+```bash
+tkt close 896eb890 <<'EOF'
+Fixed in abc1234, pinned by test_foo_unbound.
+EOF
+```
+
+For any other resolution, pass `resolution=`, for example `resolution=Works_As_Designed`.
+A fix that is uncommitted or unverified stays open, with a comment saying what is still
+owed.
+
+## Web ui
+
+`tkt serve` runs in the foreground until stopped, and prints its url as its first line.
+Each tracker has one server: a new `tkt serve`, from any terminal, stops the old one first.
+
+- **Check first:** `tkt status` prints the url when a server is running, and fails when
+  none is.
+- **Offer, then start:** start a server only when the human wants the web ui. Run
+  `tkt serve` as a background command, and tell the human three things: the url, that the
+  server runs inside this session, and that running `tkt serve` in their own terminal
+  takes it over there, in the foreground where they can watch and Ctrl-C it.
+- **Stop:** `tkt stop` works from anywhere.
+- **What the human can do there:** file, edit, comment on, close, and reopen tickets.
+  Blockers are command-line only.
+
+## Reporting
+
+When you mention a ticket to the human, give its id and title. When `tkt status`
+succeeds, also give the link: its url with `/ticket` replaced by `/tktview/<id>`.
+SKILL_MD
+}
+
+verb_skill() {
+  local dir
+  case "$1 $2" in
+    ' ') skill_md; return ;;
+    'install ') dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/tkt ;;
+    'install --project') dir=$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/skills/tkt ;;
+    *) die 'usage: tkt skill [install [--project]]' ;;
+  esac
+  [ ! -L "$dir" ] || die "$dir is a symlink; update the skill where it points instead"
+  mkdir -p "$dir"
+  skill_md >"$dir/SKILL.md"
+  note "installed $dir/SKILL.md"
+}
+
+verb_run() {
+  need
+  [ $# -gt 0 ] || die 'usage: tkt run <fossil args...>'
+  fx "$@"
+}
+
+main() {
+  local verb=${1:-help}
+  [ $# -eq 0 ] || shift
+  case "$verb" in
+    help|-h|--help) usage; return ;;
+    version|--version) printf 'tkt %s\n' "$TKT_VERSION"; return ;;
+    skill) verb_skill "$@"; return ;;
+    init|new|show|list|search|edit|comment|tag|block|set|close|serve|stop|status|sql|run) ;;
+    *) usage >&2; die "unknown verb: $verb" ;;
+  esac
+  locate
+  "verb_$verb" "$@"
+}
+
+main "$@"

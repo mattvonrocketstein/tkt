@@ -1,0 +1,38 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fossil (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fossil
+
+      - name: Install fossil (macos)
+        if: runner.os == 'macOS'
+        run: brew install fossil
+
+      - run: make init
+      - run: make build
+      - run: make test
+
+      - name: Test under the macOS system bash
+        if: runner.os == 'macOS'
+        run: TKT_BASH=/bin/bash make test
+
+      - name: Install and smoke
+        run: |
+          make install
+          "$HOME/.local/bin/tkt" version
+
+      - run: make clean
