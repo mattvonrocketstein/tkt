@@ -19,8 +19,7 @@ $(VENV)/bin/pytest:
 	$(VENV)/bin/pip install --quiet pytest
 	echo "tkt: test env ready in $(VENV)"
 
-build:
-	echo "tkt: nothing to build, the script runs as is"
+build: skill
 
 test: init
 	$(VENV)/bin/pytest -q tests/

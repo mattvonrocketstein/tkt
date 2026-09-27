@@ -40,7 +40,7 @@ The other problems `tkt` works around:
 | No tags, and no dependencies between tickets | `tags` and `blockers` fields. `tkt block` checks each id as it is written, `tkt show` derives what a ticket blocks, and prose references come from fossil's own backlink index |
 | No command shows one ticket: `fossil ticket show` dumps a whole report as tab-separated text | `tkt show`, `list`, and `search` print markdown, cross-references included |
 | The `fossil ticket` command line fails silently: a missing `mimetype` renders the body as plain text, an empty value is dropped so clearing does nothing, a one-word value such as `-q` is taken as a fossil option, and one `+` character separates append from replace | every verb sets the mimetype, clears by writing a space, refuses option-like values before calling fossil, and chooses append or replace itself |
-| The web ui is a whole version-control site: timeline, files, wiki | the home page is the ticket list, the menu is trimmed, a dark skin is the default, the ticket view has Close, Reopen, and Edit, and the forms write the description and tags |
+| The web ui is a whole version-control site: timeline, files, wiki | the home page is the ticket list, the menu is trimmed, the skin is Fossil's blitz with a dark theme, the ticket view has Close, Reopen, and Edit, and the forms write the description and tags |
 | `fossil server` listens on every network interface | `tkt serve` listens on localhost only, one server per tracker, and a new `serve` takes over from the old one |
 | Installing a custom ticket setup rewrites whichever repository it is pointed at | `init` refuses a repository that is not already a tkt tracker, unless given `--adopt` |
 
@@ -149,6 +149,7 @@ For the browser, see [Web UI](#web-ui).
 | `tkt block <id> <id...>` | replace what the ticket waits on; `--clear` empties it |
 | `tkt set <id> <field> [value...]` | write one other field; the value comes from arguments or stdin |
 | `tkt close <id> [resolution=...]` | close the ticket; stdin is the closing comment; resolution defaults to `Fixed` |
+| `tkt clean [--force]` | purge closed tickets after listing them and asking; `--force` skips the prompt; undo with `tkt run purge undo <id>` |
 | `tkt sql <query>` | read-only sql over the tracker, printed as a markdown table; the query can also come on stdin |
 | `tkt sql --schema` | the ticket tables, their conventions, and example queries |
 | `tkt serve [port=...]` | the web ui, in the foreground, replacing any server this tracker already has |
@@ -251,7 +252,8 @@ nohup tkt serve >/dev/null 2>&1 &
 | Feature | Behavior |
 | --- | --- |
 | Home page | `/` goes straight to the ticket list |
-| Skin | `xekri`, a dark skin, by default. The **Light** and **Dark** menu links switch the current page, and **Skins** lists every built-in skin. The choice is a cookie, so it is per browser |
+| Reports | the ticket home page lists **Open Tickets** colored by severity, **Critical and Severe**, **Recent Activity** for the last 30 days, **By Tag** with one row per tag, **Blocked**, and **Recently Closed**, beside Fossil's own **All Tickets** |
+| Skin | Fossil's built-in `blitz`, linked from the header rather than copied, with a dark theme layered on top. **Dark** and **Light** in the menu flip the theme; it starts from the browser's color-scheme preference and the choice is kept in local storage, so it is per browser. A browser that used the old `?skin=` links still holds Fossil's skin cookie, which overrides the repository skin; open any page with `?skin=` once to clear it |
 | Ticket view | **Close** or **Reopen**, and **Edit or comment**, open the edit form with the fields already set |
 | New ticket form | the body goes to the description, and tags can be set |
 | Edit form | appends a markdown comment, and replaces the description in place |
@@ -306,7 +308,7 @@ ln -s ~/code/tkt/skills/tkt ~/.claude/skills/tkt
 | Target | Effect |
 | --- | --- |
 | `make init` | create `.venv` with pytest; skipped when it already exists |
-| `make build` | nothing; the script runs as is |
+| `make build` | run `make skill`; the script itself needs no build step |
 | `make test` | run the suite in `tests/`, after `init` |
 | `make install` | copy `tkt` to `BINDIR`, `~/.local/bin` by default |
 | `make skill` | copy `skills/tkt/SKILL.md` into `tkt`, so `tkt skill` prints the current version |

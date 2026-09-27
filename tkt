@@ -6,8 +6,7 @@ set -eo pipefail
 TKT_VERSION=0.1.0
 FIELDS='tags blockers description'
 GUEST=hjr
-SKIN=xekri
-MENU="Tickets /ticket r {} Light ?skin=default * {} Dark ?skin=$SKIN * {} Skins /skins * {} Admin /setup {a s} desktoponly Logout /logout L desktoponly Login /login !L desktoponly"
+MENU="Tickets /ticket r {} Admin /setup {a s} desktoponly Logout /logout L desktoponly Login /login !L desktoponly"
 COLS="substr(tkt_uuid,1,10) || ' | ' || coalesce(nullif(status,''),'-') || ' | ' || coalesce(nullif(severity,''),'-') || ' | ' || coalesce(nullif(trim(tags),''),'-') || ' | ' || coalesce(nullif(title,''),'(untitled)')"
 
 # color only on a terminal, and never when either no-color variable is set or the terminal is dumb
@@ -49,6 +48,7 @@ tkt: a ticket tracker over fossil, with a mutable body.
   tkt block <id> <id...>|--clear        replace what the ticket waits on
   tkt set <id> <field> [value...]       write one field, value from args or stdin
   tkt close <id> [resolution=...]       close, stdin is the closing comment
+  tkt clean [--force]                   purge closed tickets, asking first unless forced
   tkt serve [port=...]                  web ui in the foreground, replacing any running one
   tkt stop                              stop the server started by serve
   tkt status                            print the server url and pid, or fail
@@ -305,6 +305,215 @@ Description, in markdown, replaced in place:<br>
 EOF
 }
 
+# the skin: fossil's built-in blitz, linked from the header rather than copied, plus a dark theme layered on top.
+# the Dark link in the menu flips a data-theme attribute and remembers it per browser
+skin_header() {
+  cat <<'EOF'
+<link rel="stylesheet" href="$home/builtin/skins/blitz/css.txt?mimetype=text/css">
+<script nonce="$nonce">
+(function(){
+  var k='tkt-theme', t;
+  try { t=localStorage.getItem(k); } catch(e){}
+  if(!t) t=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
+  var h=document.documentElement;
+  h.setAttribute('data-theme',t);
+  document.addEventListener('click',function(e){
+    var a=e.target.closest&&e.target.closest('#tkt-theme'); if(!a) return;
+    e.preventDefault();
+    t=t==='dark'?'light':'dark';
+    h.setAttribute('data-theme',t);
+    try { localStorage.setItem(k,t); } catch(e){}
+    a.textContent=t==='dark'?'Light':'Dark';
+  });
+  document.addEventListener('DOMContentLoaded',function(){
+    var a=document.getElementById('tkt-theme'); if(a&&t==='dark') a.textContent='Light';
+  });
+})();
+</script>
+<header>
+  <div class="container">
+    <div class='logo'>
+      <h1>$<project_name><small> &nbsp;$<title></small></h1>
+    </div>
+    <nav class="mainmenu" title="Main Menu">
+      <ul>
+        <th1>
+          html "<li><a id='hbbtn' href='$home/sitemap' aria-label='Site Map'>&#9776;</a></li>\n"
+          builtin_request_js hbmenu.js
+          set once 1
+          foreach {name url expr class} $mainmenu {
+            if {![capexpr $expr]} continue
+            if {$once && [string match $url\[/?#\]* /$current_page/]} {
+              set class "active $class"
+              set once 0
+            }
+            html "<li class='$class'>"
+            if {[string match /* $url]} {set url $home$url}
+            html "<a href='$url'>$name</a></li>\n"
+          }
+        </th1>
+        <li><a id="tkt-theme" href="#">Dark</a></li>
+      </ul>
+    </nav>
+    <nav id="hbdrop" class='hbdrop' title="sitemap"></nav>
+  </div>
+</header>
+<div class="middle max-full-width">
+  <div class="container">
+EOF
+}
+
+skin_footer() {
+  cat <<'EOF'
+  </div>
+</div>
+<footer>
+  <div class="container">
+    <div class="pull-right">
+      <a href="https://fossil-scm.org/">Fossil $release_version</a>
+    </div>
+    This page was generated in about <th1>puts [expr {([utime]+[stime]+1000)/1000*0.001}]</th1>s
+  </div>
+</footer>
+EOF
+}
+
+skin_details() {
+  cat <<'EOF'
+timeline-arrowheads:        0
+timeline-circle-nodes:      1
+timeline-color-graph-lines: 1
+white-foreground:           0
+EOF
+}
+
+# dark selectors are prefixed with html[data-theme=dark], which also outranks blitz's own rules
+skin_css() {
+  cat <<'EOF'
+html td.tktDspValue { background-color: transparent; }
+li:has(> a[href$="modreq"]) { display: none; }
+html[data-theme=dark] { color-scheme: dark; }
+html[data-theme=dark] body, html[data-theme=dark] footer, html[data-theme=dark] .middle,
+html[data-theme=dark] td.tktDspLabel, html[data-theme=dark] td.tktDescLabel,
+html[data-theme=dark] div.tktCommentHeader, html[data-theme=dark] code, html[data-theme=dark] kbd { background-color: #1b1f24; color: #d4d8de; }
+html[data-theme=dark] header { color: #c0c6cf; border-top-color: #6a9ab0; border-bottom-color: #30363d; }
+html[data-theme=dark] header h1 { color: #d4d8de; }
+html[data-theme=dark] header h1 small { color: #8b949e; }
+html[data-theme=dark] h1, html[data-theme=dark] h2, html[data-theme=dark] h3, html[data-theme=dark] h4 { color: #e6e9ed; }
+html[data-theme=dark] a, html[data-theme=dark] .content a, html[data-theme=dark] footer a,
+html[data-theme=dark] .submenu a, html[data-theme=dark] .submenu label, html[data-theme=dark] nav#hbdrop a,
+html[data-theme=dark] span.tktCommentLogin { color: #79b8d6; }
+html[data-theme=dark] .mainmenu ul { border-top-color: #30363d; }
+html[data-theme=dark] .mainmenu li a { color: #c0c6cf; }
+html[data-theme=dark] .mainmenu li.active a { color: #ffffff; }
+html[data-theme=dark] .mainmenu li:hover, html[data-theme=dark] nav#hbdrop a:hover { background-color: #2a3038; }
+html[data-theme=dark] nav#hbdrop { background-color: #22272e; border-color: #30363d; }
+html[data-theme=dark] .submenu { border-bottom-color: #30363d; }
+html[data-theme=dark] .submenu a:hover, html[data-theme=dark] .submenu label:hover { border-color: #30363d; background-color: #2a3038; }
+html[data-theme=dark] .section, html[data-theme=dark] .sectionmenu { background-color: #22272e; border-color: #30363d; color: #e6e9ed; }
+html[data-theme=dark] hr, html[data-theme=dark] blockquote, html[data-theme=dark] fieldset,
+html[data-theme=dark] table.report, html[data-theme=dark] table.tktDsp, html[data-theme=dark] table.diff,
+html[data-theme=dark] td, html[data-theme=dark] td.tktDspValue, html[data-theme=dark] td.tktDescValue,
+html[data-theme=dark] code, html[data-theme=dark] kbd, html[data-theme=dark] footer { border-color: #30363d; }
+html[data-theme=dark] td.tktDspValue, html[data-theme=dark] div.tktDspValue { background-color: transparent; }
+html[data-theme=dark] .report th { background-color: #22272e; color: #e6e9ed; }
+html[data-theme=dark] .report tr:not([style]):hover, html[data-theme=dark] .report thead+tbody tr:not([style]):hover { background-color: #2a3038 !important; }
+html[data-theme=dark] .report thead+tbody tr[style]:hover { background-color: #e8eef4 !important; }
+html[data-theme=dark] .report tr[style] td, html[data-theme=dark] .report tr[style] a,
+html[data-theme=dark] td[style*="background-color"] { color: #1b1f24; }
+html[data-theme=dark] .report tr[style] a { color: #0b3d5c; }
+html[data-theme=dark] pre, html[data-theme=dark] pre.verbatim, html[data-theme=dark] textarea,
+html[data-theme=dark] input[type=text], html[data-theme=dark] input[type=search], html[data-theme=dark] input[type=password],
+html[data-theme=dark] select { background-color: #0f1216; color: #d4d8de; border-color: #30363d; }
+html[data-theme=dark] .button, html[data-theme=dark] button, html[data-theme=dark] input[type=button], html[data-theme=dark] input[type=reset]
+  { background-color: #2a3038; border-color: #444c56; color: #d4d8de !important; }
+html[data-theme=dark] input[type=submit] { background-color: #3d6f8a; border-color: #3d6f8a; }
+html[data-theme=dark] .timelineSelected, html[data-theme=dark] .timelineSecondary, html[data-theme=dark] tr.timelineCurrent { background-color: #2a3038; }
+html[data-theme=dark] div.sidebox, html[data-theme=dark] div.divider { background-color: #22272e; color: #d4d8de; border-color: #30363d; }
+html[data-theme=dark] mark { background: #7a6a00; color: #fff; }
+EOF
+}
+
+# web reports, one row each in fossil's reportfmt table. a 'bgcolor' column colors the row and a column named '#' links to the ticket
+reports() {
+  cat <<'EOF'
+CREATE TEMP TABLE r(title, cols, sqlcode);
+INSERT INTO r VALUES('Open Tickets', '#ffffff Key:
+#f2dcdc Critical
+#f8e6cc Severe
+#fdf5d6 Important
+#e2f0d9 Minor
+#e8e8e8 Cosmetic', 'SELECT
+  CASE severity WHEN ''Critical'' THEN ''#f2dcdc'' WHEN ''Severe'' THEN ''#f8e6cc''
+       WHEN ''Important'' THEN ''#fdf5d6'' WHEN ''Minor'' THEN ''#e2f0d9'' ELSE ''#e8e8e8'' END AS ''bgcolor'',
+  substr(tkt_uuid,1,10) AS ''#'',
+  datetime(tkt_mtime) AS ''mtime'',
+  status, severity, tags, title
+FROM ticket
+WHERE status IN (''Open'',''WIP'')
+ORDER BY CASE severity WHEN ''Critical'' THEN 0 WHEN ''Severe'' THEN 1 WHEN ''Important'' THEN 2 WHEN ''Minor'' THEN 3 ELSE 4 END, tkt_mtime DESC');
+INSERT INTO r VALUES('Critical and Severe', '#ffffff Key:
+#f2dcdc Critical
+#f8e6cc Severe', 'SELECT
+  CASE severity WHEN ''Critical'' THEN ''#f2dcdc'' ELSE ''#f8e6cc'' END AS ''bgcolor'',
+  substr(tkt_uuid,1,10) AS ''#'',
+  datetime(tkt_mtime) AS ''mtime'',
+  status, severity, tags, title
+FROM ticket
+WHERE status IN (''Open'',''WIP'') AND severity IN (''Critical'',''Severe'')
+ORDER BY severity, tkt_mtime DESC');
+INSERT INTO r VALUES('Recent Activity', '#ffffff Key:
+#f2dcdc Open
+#fdf5d6 WIP
+#c8c8c8 Closed', 'SELECT
+  CASE status WHEN ''Open'' THEN ''#f2dcdc'' WHEN ''WIP'' THEN ''#fdf5d6'' ELSE ''#c8c8c8'' END AS ''bgcolor'',
+  substr(tkt_uuid,1,10) AS ''#'',
+  datetime(tkt_mtime) AS ''mtime'',
+  status, severity, tags, title
+FROM ticket
+WHERE tkt_mtime > julianday(''now'',''-30 days'')
+ORDER BY tkt_mtime DESC');
+INSERT INTO r VALUES('By Tag', '#ffffff Key:
+#f2dcdc Open
+#fdf5d6 WIP', 'WITH RECURSIVE split(tkt_id, tag, rest) AS (
+  SELECT tkt_id, '''', trim(coalesce(tags,''''))||'' '' FROM ticket WHERE status IN (''Open'',''WIP'') AND trim(coalesce(tags,'''')) <> ''''
+  UNION ALL
+  SELECT tkt_id, substr(rest,1,instr(rest,'' '')-1), ltrim(substr(rest,instr(rest,'' '')+1)) FROM split WHERE rest <> ''''
+)
+SELECT
+  CASE t.status WHEN ''Open'' THEN ''#f2dcdc'' ELSE ''#fdf5d6'' END AS ''bgcolor'',
+  s.tag AS ''tag'',
+  substr(t.tkt_uuid,1,10) AS ''#'',
+  t.status, t.severity, t.title
+FROM split s JOIN ticket t ON t.tkt_id=s.tkt_id
+WHERE s.tag <> ''''
+ORDER BY s.tag, t.tkt_mtime DESC');
+INSERT INTO r VALUES('Blocked', '#ffffff Key:
+#f2dcdc Open
+#fdf5d6 WIP', 'SELECT
+  CASE status WHEN ''Open'' THEN ''#f2dcdc'' ELSE ''#fdf5d6'' END AS ''bgcolor'',
+  substr(tkt_uuid,1,10) AS ''#'',
+  datetime(tkt_mtime) AS ''mtime'',
+  status, severity, blockers AS ''blocked by'', title
+FROM ticket
+WHERE status IN (''Open'',''WIP'') AND trim(coalesce(blockers,'''')) <> ''''
+ORDER BY tkt_mtime DESC');
+INSERT INTO r VALUES('Recently Closed', '#ffffff Key:
+#c8c8c8 Closed', 'SELECT
+  ''#c8c8c8'' AS ''bgcolor'',
+  substr(tkt_uuid,1,10) AS ''#'',
+  datetime(tkt_mtime) AS ''closed'',
+  resolution, severity, tags, title
+FROM ticket
+WHERE status=''Closed''
+ORDER BY tkt_mtime DESC LIMIT 100');
+DELETE FROM reportfmt WHERE title IN (SELECT title FROM r);
+INSERT INTO reportfmt(owner, title, mtime, cols, sqlcode)
+  SELECT 'tkt', title, strftime('%s','now'), cols, sqlcode FROM r;
+DROP TABLE r;
+EOF
+}
+
 verb_init() {
   command -v fossil >/dev/null || die 'fossil not found; see https://fossil-scm.org for install instructions'
   local tmp adopt=
@@ -323,13 +532,23 @@ verb_init() {
   view >"$tmp/view"
   newpage >"$tmp/new"
   editpage >"$tmp/edit"
+  skin_css >"$tmp/css"
+  skin_header >"$tmp/header"
+  skin_footer >"$tmp/footer"
+  skin_details >"$tmp/details"
+  reports >"$tmp/reports"
   sqlq "replace into config(name,value,mtime) values('ticket-table',cast(readfile('$tmp/schema') as text),strftime('%s','now'));" \
        "replace into config(name,value,mtime) values('ticket-viewpage',cast(readfile('$tmp/view') as text),strftime('%s','now'));" \
        "replace into config(name,value,mtime) values('ticket-newpage',cast(readfile('$tmp/new') as text),strftime('%s','now'));" \
        "replace into config(name,value,mtime) values('ticket-editpage',cast(readfile('$tmp/edit') as text),strftime('%s','now'));" \
        "replace into config(name,value,mtime) values('mainmenu',$(lit "$MENU"),strftime('%s','now'));" \
        "replace into config(name,value,mtime) values('index-page','/ticket',strftime('%s','now'));" \
-       "replace into config(name,value,mtime) values('default-skin','$SKIN',strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('css',cast(readfile('$tmp/css') as text),strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('header',cast(readfile('$tmp/header') as text),strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('footer',cast(readfile('$tmp/footer') as text),strftime('%s','now'));" \
+       "replace into config(name,value,mtime) values('details',cast(readfile('$tmp/details') as text),strftime('%s','now'));" \
+       "delete from config where name='default-skin';" \
+       ".read $tmp/reports" \
        "replace into config(name,value,mtime) values('tkt-version','$TKT_VERSION',strftime('%s','now'));"
   rm -rf "$tmp"
   fx user capabilities nobody "$GUEST" >&2
@@ -447,6 +666,28 @@ verb_close() {
   safe "$kv_resolution" "$body"
   fx ticket set "$id" status Closed resolution "${kv_resolution:-Fixed}"
   [ -z "$body" ] || fx ticket set "$id" +icomment "$body" mimetype text/x-markdown
+}
+
+# purged artifacts go to fossil's graveyard, so a clean can be reverted with: tkt run purge undo <id>
+verb_clean() {
+  need
+  local force= a hashes ans
+  for a in "$@"; do
+    case "$a" in
+      -f|--force) force=1 ;;
+      *) die 'usage: tkt clean [--force]' ;;
+    esac
+  done
+  hashes=$(sqlq "select b.uuid from blob b join ticketchng c on c.tkt_rid=b.rid join ticket t on t.tkt_id=c.tkt_id where t.status='Closed';")
+  [ -n "$hashes" ] || { note 'no closed tickets'; return; }
+  sqlq "select $COLS from ticket where status='Closed' order by tkt_mtime desc;" | paint
+  if [ -z "$force" ]; then
+    [ -t 0 ] || die 'not a terminal; use: tkt clean --force'
+    read -r -p 'purge these closed tickets? [y/N] ' ans || ans=
+    case "$ans" in y|Y|yes|YES) ;; *) die 'aborted' ;; esac
+  fi
+  fx purge artifacts $hashes >/dev/null
+  note 'purged; undo with: tkt run purge undo <id>, see: tkt run purge list'
 }
 
 verb_show() {
@@ -781,7 +1022,7 @@ main() {
     help|-h|--help) usage; return ;;
     version|--version) printf 'tkt %s\n' "$TKT_VERSION"; return ;;
     skill) verb_skill "$@"; return ;;
-    init|new|show|list|search|edit|comment|tag|block|set|close|serve|stop|status|sql|run) ;;
+    init|new|show|list|search|edit|comment|tag|block|set|close|clean|serve|stop|status|sql|run) ;;
     *) usage >&2; die "unknown verb: $verb" ;;
   esac
   locate

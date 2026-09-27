@@ -223,10 +223,18 @@ class TestInit:
 
     def test_installs_web_ui(self, tkt):
         assert config(tkt.db, "index-page") == "/ticket"
-        assert config(tkt.db, "default-skin") == "xekri"
+        assert config(tkt.db, "default-skin") == ""
         menu = config(tkt.db, "mainmenu")
-        for entry in ("Tickets /ticket", "Light ?skin=default", "Dark ?skin=xekri", "Skins /skins"):
+        for entry in ("Tickets /ticket", "Admin /setup"):
             assert entry in menu
+        assert "skin=" not in menu
+        assert "builtin/skins/blitz/css.txt?mimetype=text/css" in config(tkt.db, "header")
+        assert 'id="tkt-theme"' in config(tkt.db, "header")
+        assert "html[data-theme=dark]" in config(tkt.db, "css")
+        assert config(tkt.db, "footer") and config(tkt.db, "details")
+        titles = tkt.sql("select title from reportfmt order by title;").split("\n")
+        for t in ("All Tickets", "Open Tickets", "Critical and Severe", "Recent Activity", "By Tag", "Blocked", "Recently Closed"):
+            assert t in titles
         assert 'name="description"' in config(tkt.db, "ticket-newpage")
         edit = config(tkt.db, "ticket-editpage")
         assert 'name="description"' in edit and "text/x-markdown" in edit
@@ -393,6 +401,30 @@ class TestClose:
     def test_unknown_argument_fails(self, tkt):
         a = tkt.new("closing")
         tkt.fails("close", a, "reslution=x", match="unknown field: reslution")
+
+
+class TestClean:
+    def test_force_purges_only_closed(self, tkt):
+        a = tkt.new("keep me")
+        b = tkt.new("drop me")
+        tkt.ok("close", b)
+        tkt.ok("clean", "--force")
+        out = tkt.ok("list", "status=all")
+        assert a in out and b not in out
+
+    def test_without_force_off_a_terminal_refuses(self, tkt):
+        b = tkt.new("drop me")
+        tkt.ok("close", b)
+        tkt.fails("clean", match="--force")
+        assert b in tkt.ok("list", "status=all")
+
+    def test_nothing_closed_is_fine(self, tkt):
+        a = tkt.new("open")
+        tkt.ok("clean", "--force")
+        assert a in tkt.ok("list")
+
+    def test_unknown_argument_fails(self, tkt):
+        tkt.fails("clean", "--forse", match="usage")
 
 
 class TestListAndSearch:
