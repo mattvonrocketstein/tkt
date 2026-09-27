@@ -5,6 +5,7 @@ import pty
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -126,7 +127,7 @@ def config(db, name):
 class TestSurface:
     def test_help_lists_every_verb(self):
         out = run("help").stdout
-        for verb in "init new show list search edit comment tag block set close serve stop status sql skill run".split():
+        for verb in "init new show list search todo triage edit comment tag block set close serve stop status sql skill run".split():
             assert f"tkt {verb}" in out
 
     def test_unknown_verb_fails(self):
@@ -231,6 +232,11 @@ class TestInit:
         assert "builtin/skins/blitz/css.txt?mimetype=text/css" in config(tkt.db, "header")
         assert 'id="tkt-theme"' in config(tkt.db, "header")
         assert "html[data-theme=dark]" in config(tkt.db, "css")
+        css = config(tkt.db, "css")
+        assert 'html[data-theme=dark] .report tr[style*="#f2dcdc"]' in css and "a.tkt-facet" in css
+        assert "function facets()" in config(tkt.db, "header") and "function zoomSlider()" in config(tkt.db, "header")
+        assert "div.container { max-width: none; width: 84%; }" in css and ".submenu .tkt-zoom" in css
+        assert tkt.sql("select count(*) from reportfmt where owner='tkt' and sqlcode like '%subsystem%';") == "5"
         assert config(tkt.db, "footer") and config(tkt.db, "details")
         titles = tkt.sql("select title from reportfmt order by title;").split("\n")
         for t in ("All Tickets", "Open Tickets", "Critical and Severe", "Recent Activity", "By Tag", "Blocked", "Recently Closed"):
@@ -238,7 +244,166 @@ class TestInit:
         assert 'name="description"' in config(tkt.db, "ticket-newpage")
         edit = config(tkt.db, "ticket-editpage")
         assert 'name="description"' in edit and "text/x-markdown" in edit
-        assert "status=Closed&amp;resolution=Fixed" in config(tkt.db, "ticket-viewpage")
+        view = config(tkt.db, "ticket-viewpage")
+        assert "status=Closed&amp;resolution=Fixed" in view
+        assert view.count('markdown "<!-- -->\\n\\n$') == 2
+
+
+def git(cwd, *args):
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+
+class TestHighlight:
+    def test_on_by_default(self, tkt):
+        header = config(tkt.db, "header")
+        assert header.count("cdnjs.cloudflare.com/ajax/libs/prism/") == 2
+        assert 'integrity="sha384-' in header and "defer" in header
+        assert header.index("prism-core") < header.index('<script nonce="$nonce">\n')
+        csp = config(tkt.db, "default-csp")
+        assert "'nonce-$nonce' https://cdnjs.cloudflare.com" in csp and csp.startswith("default-src 'self'")
+        assert ".token.keyword" in config(tkt.db, "css") and "html[data-theme=dark] .token.keyword" in config(tkt.db, "css")
+
+    def test_env_turns_it_off_at_init_and_at_serve(self, tkt):
+        r = run("init", db=tkt.db, cwd=tkt.cwd, extra={"TKT_HIGHLIGHT": "0"})
+        assert r.returncode == 0, r.stderr
+        assert "prism" not in config(tkt.db, "header")
+        assert 'id="tkt-theme"' in config(tkt.db, "header")
+        import socket
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        p = subprocess.Popen([BASH, str(SCRIPT), "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db)},
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            assert p.stdout.readline().startswith("http://localhost:")
+            assert "prism-core" in config(tkt.db, "header")
+        finally:
+            p.terminate()
+            p.wait(timeout=10)
+            tkt.ok("stop")
+
+
+class TestGithubLinks:
+    def test_absent_outside_git(self, tkt):
+        assert "tkt-github" not in config(tkt.db, "header")
+
+    def test_absent_without_a_github_remote(self, tkt):
+        git(tkt.cwd, "init", "-q")
+        git(tkt.cwd, "remote", "add", "origin", "https://gitlab.com/o/r.git")
+        tkt.ok("init")
+        assert "tkt-github" not in config(tkt.db, "header")
+
+    @pytest.mark.parametrize("remote", ["git@github.com:o/r.git", "https://github.com/o/r", "ssh://git@github.com/o/r.git"])
+    def test_init_links_actions_issues_and_main(self, tkt, remote):
+        git(tkt.cwd, "init", "-q")
+        git(tkt.cwd, "remote", "add", "origin", remote)
+        tkt.ok("init")
+        header = config(tkt.db, "header")
+        assert header.index('id="tkt-theme"') < header.index('class="tkt-github"')
+        for href in ("https://github.com/o/r", "https://github.com/o/r/actions", "https://github.com/o/r/issues", "https://github.com/o/r/tree/main"):
+            assert f'href="{href}"' in header
+        drop = header[header.index('id="tkt-ghdrop"'):]
+        assert drop.index(">Actions<") < drop.index(">Issues<") < drop.index(">Main<")
+
+    def test_main_follows_the_default_branch(self, tkt):
+        git(tkt.cwd, "init", "-q")
+        git(tkt.cwd, "remote", "add", "origin", "git@github.com:o/r.git")
+        Path(tkt.cwd / ".git/refs/remotes/origin").mkdir(parents=True, exist_ok=True)
+        git(tkt.cwd, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+        tkt.ok("init")
+        assert 'href="https://github.com/o/r/tree/trunk"' in config(tkt.db, "header")
+
+    def test_serve_refreshes_the_header(self, tkt):
+        import socket
+
+        assert "tkt-github" not in config(tkt.db, "header")
+        git(tkt.cwd, "init", "-q")
+        git(tkt.cwd, "remote", "add", "origin", "git@github.com:o/r.git")
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen()
+            port = s.getsockname()[1]
+            tkt.fails("serve", f"port={port}", match="is taken")
+            assert "tkt-github" not in config(tkt.db, "header")
+        p = subprocess.Popen([BASH, str(SCRIPT), "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db)},
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            assert p.stdout.readline().startswith("http://localhost:")
+            assert 'href="https://github.com/o/r/issues"' in config(tkt.db, "header")
+        finally:
+            p.terminate()
+            p.wait(timeout=10)
+            tkt.ok("stop")
+        assert "nav.tkt-ghdrop" in config(tkt.db, "css")
+
+
+class TestServeOpensBrowser:
+    def serve_on_tty(self, tkt, tmp_path, **env):
+        """Serve on a pty with a fake $BROWSER that records its argument, stop once the server is up, and return what it recorded."""
+        import socket
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        seen = tmp_path / "seen"
+        browser = tmp_path / "browser"
+        browser.write_text(f"#!/bin/sh\nprintf '%s' \"$1\" >{seen}\n")
+        browser.chmod(0o755)
+        full = {k: v for k, v in os.environ.items() if k != "TKT_DB"}
+        full.update(TKT_DB=str(tkt.db), BROWSER=str(browser), **env)
+        parent, child = pty.openpty()
+        proc = subprocess.Popen([BASH, str(SCRIPT), "serve", f"port={port}"], stdin=subprocess.DEVNULL, stdout=child, stderr=child, env=full, cwd=tkt.cwd)
+        os.close(child)
+        try:
+            for _ in range(100):
+                if seen.exists() or proc.poll() is not None:
+                    break
+                with socket.socket() as s:
+                    if s.connect_ex(("127.0.0.1", port)) == 0 and env.get("TKT_OPEN") == "0":
+                        time.sleep(0.5)
+                        break
+                time.sleep(0.1)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+            tkt.ok("stop")
+            os.close(parent)
+        return seen.read_text() if seen.exists() else None, port
+
+    def test_opens_the_url_on_a_terminal(self, tkt, tmp_path):
+        seen, port = self.serve_on_tty(tkt, tmp_path)
+        assert seen == f"http://localhost:{port}/ticket"
+
+    def test_tkt_open_zero_skips_it(self, tkt, tmp_path):
+        seen, _ = self.serve_on_tty(tkt, tmp_path, TKT_OPEN="0")
+        assert seen is None
+
+    def test_no_terminal_skips_it(self, tkt, tmp_path):
+        import socket
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        seen = tmp_path / "seen"
+        browser = tmp_path / "browser"
+        browser.write_text(f"#!/bin/sh\nprintf '%s' \"$1\" >{seen}\n")
+        browser.chmod(0o755)
+        p = subprocess.Popen([BASH, str(SCRIPT), "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db), "BROWSER": str(browser)},
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            assert p.stdout.readline().startswith("http://localhost:")
+            for _ in range(50):
+                with socket.socket() as s:
+                    if s.connect_ex(("127.0.0.1", port)) == 0:
+                        break
+                time.sleep(0.1)
+            time.sleep(0.5)
+        finally:
+            p.terminate()
+            p.wait(timeout=10)
+            tkt.ok("stop")
+        assert not seen.exists()
 
 
 class TestNew:
@@ -461,6 +626,71 @@ class TestListAndSearch:
         tkt.fails("search", match="usage")
 
 
+class TestTodo:
+    def seed(self, tkt):
+        a = tkt.new("old minor", severity="Minor", subsystem="ui")
+        b = tkt.new("closed critical", severity="Critical")
+        tkt.ok("close", b)
+        c = tkt.new("severe one", severity="Severe", subsystem="core")
+        d = tkt.new("severe two", severity="Severe")
+        return a, b, c, d
+
+    def test_newest_open_first_with_the_four_columns(self, tkt):
+        a, b, c, d = self.seed(tkt)
+        rows = tkt.ok("todo").strip().split("\n")
+        assert [r.split(" | ")[0] for r in rows] == [d, c, a]
+        assert rows[1] == f"{c} | severe one | Severe | core"
+        assert rows[2] == f"{a} | old minor | Minor | ui"
+        assert b not in tkt.ok("todo")
+
+    def test_n_limits(self, tkt):
+        a, b, c, d = self.seed(tkt)
+        rows = tkt.ok("todo", "2").strip().split("\n")
+        assert [r.split(" | ")[0] for r in rows] == [d, c]
+
+    def test_triage_keeps_only_the_top_severity_present(self, tkt):
+        a, b, c, d = self.seed(tkt)
+        for out in (tkt.ok("todo", "--triage"), tkt.ok("triage"), tkt.ok("triage", "1")):
+            assert d in out and a not in out and b not in out
+        assert c in tkt.ok("triage") and c not in tkt.ok("triage", "1")
+        tkt.new("now critical", severity="Critical")
+        out = tkt.ok("triage")
+        assert "now critical" in out and c not in out and d not in out
+
+    def test_empty(self, tkt):
+        assert tkt.ok("todo") == ""
+        assert tkt.ok("triage", "-f", "json").strip() == "[]"
+        assert tkt.ok("todo", "-f", "md").strip() == ""
+
+    def test_json(self, tkt):
+        import json
+
+        a, b, c, d = self.seed(tkt)
+        rows = json.loads(tkt.ok("todo", "-f", "json"))
+        assert [r["id"] for r in rows] == [d, c, a]
+        assert rows[1] == {"id": c, "title": "severe one", "severity": "Severe", "subsystem": "core"}
+        assert rows[2]["subsystem"] == "ui" and rows[0]["subsystem"] == "-"
+        assert json.loads(tkt.ok("todo", "--format=json", "1")) == rows[:1]
+
+    def test_markdown(self, tkt):
+        a, b, c, d = self.seed(tkt)
+        lines = tkt.ok("todo", "--format", "md").strip().split("\n")
+        assert lines[0].split() == "| id | title | severity | subsystem |".split()
+        assert set(lines[1]) <= set("|-")
+        assert len(lines) == 5 and c in lines[3]
+
+    def test_bad_arguments(self, tkt):
+        tkt.fails("todo", "x", match="usage: tkt todo")
+        tkt.fails("todo", "-f", match="usage: tkt todo")
+        tkt.fails("todo", "-f", "yaml", match="unknown format: yaml")
+        tkt.fails("triage", "--format=csv", match="unknown format: csv")
+
+    def test_color_on_a_terminal_only(self, tkt):
+        self.seed(tkt)
+        assert "\x1b[" not in tkt.ok("todo")
+        assert "\x1b[1m" in run_tty("todo", db=tkt.db)
+
+
 class TestSql:
     def test_select_prints_markdown(self, tkt):
         tkt.new("queried")
@@ -589,3 +819,32 @@ class TestServer:
 
     def test_bad_port_fails(self, tkt):
         tkt.fails("serve", "port=abc", match="not a port")
+
+    def test_taken_port_fails_before_the_pid_file(self, tkt):
+        import socket
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen()
+            port = s.getsockname()[1]
+            err = tkt.fails("serve", f"port={port}", match=f"port {port} is taken")
+        assert "port=<n>" in err and "TKT_PORT" in err and ".env" in err
+        assert not Path(f"{tkt.db}.pid").exists()
+
+    def test_dotenv_port_is_read_not_sourced(self, tkt):
+        import socket
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen()
+            port = s.getsockname()[1]
+            (tkt.db.parent / ".env").write_text(f'FOO=$(exit 3)\nexport TKT_PORT="{port}"  # here\n')
+            tkt.fails("serve", match=f"port {port} is taken")
+            with socket.socket() as other:
+                other.bind(("127.0.0.1", 0))
+                other.listen()
+                env_port = other.getsockname()[1]
+                r = run("serve", db=tkt.db, cwd=tkt.cwd, extra={"TKT_PORT": str(env_port)})
+                assert f"port {env_port} is taken" in r.stderr
+                r = run("serve", f"port={port}", db=tkt.db, cwd=tkt.cwd, extra={"TKT_PORT": str(env_port)})
+                assert f"port {port} is taken" in r.stderr

@@ -52,6 +52,8 @@ cat /tmp/ticket-body.md | tkt new title='foo explodes'
 | --- | --- |
 | Read one ticket | `tkt show <id>` |
 | List open tickets | `tkt list`, or `tkt list status=all tag=<word>` |
+| What to work on | `tkt todo`, the 10 newest open tickets; `tkt todo 5 -f json` for fewer, as json |
+| What is most urgent | `tkt triage`, only the top severity present among open tickets |
 | Find a ticket | `tkt search <text>` |
 | Restate the problem | `tkt edit <id> <<'EOF'` ... |
 | Add to the record | `tkt comment <id> <<'EOF'` ... |
@@ -147,6 +149,11 @@ Each tracker has one server: a new `tkt serve`, from any terminal, stops the old
   `tkt serve` as a background command, and tell the human three things: the url, that the
   server runs inside this session, and that running `tkt serve` in their own terminal
   takes it over there, in the foreground where they can watch and Ctrl-C it.
+- **Port:** the default is 9080 for every project, so `serve` fails with `port ... is taken`
+  when another project is already serving. Do not stop that other server. Pick a free port
+  and pass it, `tkt serve port=9081`, and tell the human that adding `TKT_PORT=9081` to the
+  project's `.env` beside `.tkt.fossil` makes it the default. Never edit `.env` yourself
+  unless asked. `TKT_PORT` in the environment beats `.env`, and `port=` beats both.
 - **Stop:** `tkt stop` works from anywhere.
 - **What the human can do there:** file, edit, comment on, close, and reopen tickets.
   Blockers are command-line only.

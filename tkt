@@ -42,6 +42,8 @@ tkt: a ticket tracker over fossil, with a mutable body.
   tkt show <id>                         one ticket as markdown
   tkt list [status=...] [tag=...]       markdown table, Open and WIP by default
   tkt search <text>                     substring across titles, descriptions, comments
+  tkt todo [N] [--triage] [-f FMT]      the N newest open tickets, 10 by default; FMT is txt, md, or json
+  tkt triage [N] [-f FMT]               todo, only the top severity present
   tkt edit <id>                         replace the description from stdin or $EDITOR
   tkt comment <id>                      add a comment from stdin or $EDITOR
   tkt tag <id> <tag...>|--clear         replace the tag set
@@ -49,7 +51,8 @@ tkt: a ticket tracker over fossil, with a mutable body.
   tkt set <id> <field> [value...]       write one field, value from args or stdin
   tkt close <id> [resolution=...]       close, stdin is the closing comment
   tkt clean [--force]                   purge closed tickets, asking first unless forced
-  tkt serve [port=...]                  web ui in the foreground, replacing any running one
+  tkt serve [port=...]                  web ui in the foreground, replacing any running one; opens a browser on a terminal, TKT_OPEN=0 to skip.
+                                        code fences are highlighted by prism from cdnjs, TKT_HIGHLIGHT=0 to leave it out
   tkt stop                              stop the server started by serve
   tkt status                            print the server url and pid, or fail
   tkt sql <query> | --schema            read-only sql, as markdown; stdin works too
@@ -210,7 +213,8 @@ html " <a class=\"button\" href=\"$home/tktedit/$tkt_uuid\">Edit or comment</a><
 if {[info exists description] && [string length $description] > 0} {
   html "<div class=\"section\">Description</div>\n"
   html "<div class=\"tktDspValue\">\n"
-  html [lindex [markdown $description] 1]
+  # th1 markdown returns {title body} and strips a leading heading into the title; the comment keeps it in the body
+  html [lindex [markdown "<!-- -->\n\n$description"] 1]
   html "</div>\n"
 }
 query {SELECT datetime(tkt_mtime) AS xdate, coalesce(login,'') AS xwho,
@@ -220,7 +224,7 @@ query {SELECT datetime(tkt_mtime) AS xdate, coalesce(login,'') AS xwho,
         ORDER BY tkt_mtime} {
   html "<div class=\"section\">Comment by $xwho on $xdate</div>\n"
   html "<div class=\"tktDspValue\">\n"
-  html [lindex [markdown $xcmt] 1]
+  html [lindex [markdown "<!-- -->\n\n$xcmt"] 1]
   html "</div>\n"
 }
 </th1>
@@ -305,55 +309,167 @@ Description, in markdown, replaced in place:<br>
 EOF
 }
 
+# the github project behind the tracker's directory, as https://github.com/owner/repo, when origin points there
+github_url() {
+  local url
+  url=$(git -C "$(dirname "$REPO")" remote get-url origin 2>/dev/null) || return 1
+  case "$url" in
+    git@github.com:*) url=${url#git@github.com:} ;;
+    ssh://git@github.com/*) url=${url#ssh://git@github.com/} ;;
+    https://github.com/*) url=${url#https://github.com/} ;;
+    *) return 1 ;;
+  esac
+  url=${url%/}; url=${url%.git}
+  case "$url" in */*/*|*/|/*|'') return 1 ;; esac
+  printf 'https://github.com/%s' "$url"
+}
+
+# the default branch as origin knows it, else main
+github_branch() {
+  local ref
+  ref=$(git -C "$(dirname "$REPO")" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) && [ -n "${ref##*/}" ] && printf '%s' "${ref##*/}" || printf main
+}
+
 # the skin: fossil's built-in blitz, linked from the header rather than copied, plus a dark theme layered on top.
-# the Dark link in the menu flips a data-theme attribute and remembers it per browser
+# the Dark link in the menu flips a data-theme attribute and remembers it per browser.
+# with a github url, Actions | Issues | Main links follow the theme toggle
+PRISM=https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0
+PRISM_CORE_SRI=sha384-MXybTpajaBV0AkcBaCPT4KIvo0FzoCiWXgcihYsw4FUkEz0Pv3JGV6tk2G8vJtDc
+PRISM_AUTOLOAD_SRI=sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q
+# fossil's own csp plus the prism host, so the autoloader can fetch grammars; $nonce is filled in by fossil per page
+CSP="default-src 'self' data:; script-src 'self' 'nonce-\$nonce' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src * data:"
+
+# syntax highlighting is prism from a cdn, deferred, with no theme: token colors live in the skin css for both themes.
+# it fails quietly offline, and TKT_HIGHLIGHT=0 leaves it out of the header entirely
+prism_tags() {
+  [ "${TKT_HIGHLIGHT:-1}" != 0 ] || return 0
+  printf '<script nonce="$nonce" src="%s/components/prism-core.min.js" integrity="%s" crossorigin="anonymous" defer></script>\n' "$PRISM" "$PRISM_CORE_SRI"
+  printf '<script nonce="$nonce" src="%s/plugins/autoloader/prism-autoloader.min.js" integrity="%s" crossorigin="anonymous" defer></script>\n' "$PRISM" "$PRISM_AUTOLOAD_SRI"
+}
+
 skin_header() {
-  cat <<'EOF'
-<link rel="stylesheet" href="$home/builtin/skins/blitz/css.txt?mimetype=text/css">
-<script nonce="$nonce">
+  local gh=${1:-} links= prism
+  prism=$(prism_tags)
+  if [ -n "$gh" ]; then
+    links="        <li class=\"tkt-github\"><a id=\"tkt-gh\" href=\"$gh\" title=\"GitHub\" aria-haspopup=\"true\"><svg viewBox=\"0 0 16 16\" width=\"16\" height=\"16\" aria-label=\"GitHub\"><path fill=\"currentColor\" d=\"M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z\"/></svg></a><nav id=\"tkt-ghdrop\" class=\"tkt-ghdrop\" title=\"GitHub\"><a href=\"$gh/actions\">Actions</a><a href=\"$gh/issues\">Issues</a><a href=\"$gh/tree/$(github_branch)\">Main</a></nav></li>
+"
+  fi
+  cat <<EOF
+<link rel="stylesheet" href="\$home/builtin/skins/blitz/css.txt?mimetype=text/css">
+$prism<script nonce="\$nonce">
 (function(){
   var k='tkt-theme', t;
   try { t=localStorage.getItem(k); } catch(e){}
   if(!t) t=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
   var h=document.documentElement;
   h.setAttribute('data-theme',t);
+  // page zoom: css zoom on the root scales everything and reflows; browsers without it scale the root font instead
+  var zk='tkt-zoom', z=100;
+  try { z=parseInt(localStorage.getItem(zk),10)||100; } catch(e){}
+  function zoom(v){
+    z=v; if('zoom' in h.style) h.style.zoom=v/100; else h.style.fontSize=v+'%';
+    try { localStorage.setItem(zk,String(v)); } catch(e){}
+  }
+  zoom(z);
   document.addEventListener('click',function(e){
     var a=e.target.closest&&e.target.closest('#tkt-theme'); if(!a) return;
     e.preventDefault();
     t=t==='dark'?'light':'dark';
     h.setAttribute('data-theme',t);
     try { localStorage.setItem(k,t); } catch(e){}
-    a.textContent=t==='dark'?'Light':'Dark';
   });
+  // report tables: status, severity, subsystem, tags and the like become links that filter the rows in place.
+  // the filter lives in the url hash, so a filtered view can be bookmarked or shared
+  function facets(){
+    var t=document.querySelector('table.report.sortable')||document.querySelector('table.report thead')&&document.querySelector('table.report thead').parentNode; if(!t||!t.tHead||!t.tBodies.length) return;
+    var multi={tags:1,tag:1,'blocked by':1}, keys={status:1,severity:1,subsystem:1,type:1,priority:1,resolution:1,tags:1,tag:1,'blocked by':1};
+    var heads=[].map.call(t.tHead.rows[0].cells,function(h){return h.textContent.trim().toLowerCase();});
+    var rows=[].slice.call(t.tBodies[0].rows);
+    function parse(){ var f={}; location.hash.slice(1).split('&').forEach(function(p){ var i=p.indexOf('='); if(i>0) f[decodeURIComponent(p.slice(0,i))]=decodeURIComponent(p.slice(i+1)); }); return f; }
+    // fossil pages carry a base href, so hash links must spell out the page path or they leave the page
+    function href(f){ var q=[]; for(var k in f) q.push(encodeURIComponent(k)+'='+encodeURIComponent(f[k])); return location.pathname+location.search+'#'+q.join('&'); }
+    function words(c,k){ var v=c.textContent.trim(); return multi[k]?v.split(/\s+/).filter(Boolean):(v?[v]:[]); }
+    rows.forEach(function(r){
+      heads.forEach(function(k,i){
+        var c=r.cells[i]; if(!keys[k]||!c||c.querySelector('a')) return;
+        var ws=words(c,k); if(!ws.length) return;
+        c.textContent='';
+        ws.forEach(function(w,j){
+          var a=document.createElement('a'); a.className='tkt-facet'; a.textContent=w; a.setAttribute('data-k',k); a.setAttribute('data-v',w); a.href='#';
+          a.title='filter '+k+' = '+w; c.appendChild(a); if(j<ws.length-1) c.appendChild(document.createTextNode(' '));
+        });
+      });
+    });
+    var bar=document.createElement('div'); bar.className='tkt-filterbar'; bar.style.display='none'; t.parentNode.insertBefore(bar,t);
+    function apply(){
+      var f=parse(), ks=Object.keys(f);
+      rows.forEach(function(r){
+        var ok=ks.every(function(k){ var i=heads.indexOf(k); return i>=0&&r.cells[i]&&words(r.cells[i],k).indexOf(f[k])>=0; });
+        r.classList.toggle('tkt-hide',!ok);
+      });
+      bar.textContent=''; bar.style.display=ks.length?'':'none';
+      if(!ks.length) return;
+      var b=document.createElement('b'); b.textContent='Filter:'; bar.appendChild(b);
+      ks.forEach(function(k){ var g={}; for(var o in f) if(o!==k) g[o]=f[o]; var a=document.createElement('a'); a.href=href(g); a.textContent=k+' = '+f[k]+' \u00d7'; a.title='remove'; bar.appendChild(a); });
+      var x=document.createElement('a'); x.href=location.pathname+location.search+'#'; x.className='tkt-clear'; x.textContent='clear'; bar.appendChild(x);
+      var n=rows.filter(function(r){return !r.classList.contains('tkt-hide');}).length;
+      bar.appendChild(document.createTextNode(' '+n+' of '+rows.length));
+    }
+    t.addEventListener('click',function(e){
+      var a=e.target.closest&&e.target.closest('a.tkt-facet'); if(!a) return;
+      e.preventDefault();
+      var f=parse(), k=a.getAttribute('data-k'), v=a.getAttribute('data-v');
+      if(f[k]===v) delete f[k]; else f[k]=v;
+      var h=href(f); location.hash=h.slice(h.indexOf('#')+1);
+      if(!location.hash) apply();
+    });
+    window.addEventListener('hashchange',apply);
+    apply();
+  }
+  function zoomSlider(){
+    var m=document.querySelector('.submenu'); if(!m) return;
+    var w=document.createElement('span'), r=document.createElement('input');
+    w.className='tkt-zoom'; r.type='range'; r.min=70; r.max=160; r.step=5; r.value=z; r.title='Page zoom '+z+'%; double-click for 100%';
+    r.addEventListener('input',function(){ zoom(parseInt(r.value,10)); r.title='Page zoom '+z+'%; double-click for 100%'; });
+    r.addEventListener('dblclick',function(){ r.value=100; zoom(100); r.title='Page zoom 100%; double-click for 100%'; });
+    w.appendChild(r); m.insertBefore(w,m.firstChild);
+  }
   document.addEventListener('DOMContentLoaded',function(){
-    var a=document.getElementById('tkt-theme'); if(a&&t==='dark') a.textContent='Light';
+    zoomSlider();
+    facets();
+    var b=document.getElementById('tkt-gh'), d=document.getElementById('tkt-ghdrop');
+    if(!b||!d) return;
+    function show(on){ d.style.display=on?'block':''; b.setAttribute('aria-expanded',on?'true':'false'); }
+    b.addEventListener('click',function(e){ e.preventDefault(); show(d.style.display!=='block'); });
+    document.addEventListener('click',function(e){ if(!b.contains(e.target)&&!d.contains(e.target)) show(false); });
+    document.addEventListener('keydown',function(e){ if(e.key==='Escape') show(false); });
   });
 })();
 </script>
 <header>
   <div class="container">
     <div class='logo'>
-      <h1>$<project_name><small> &nbsp;$<title></small></h1>
+      <h1>\$<project_name><small> &nbsp;\$<title></small></h1>
     </div>
     <nav class="mainmenu" title="Main Menu">
       <ul>
         <th1>
-          html "<li><a id='hbbtn' href='$home/sitemap' aria-label='Site Map'>&#9776;</a></li>\n"
+          html "<li class='tkt-hb'><a id='hbbtn' href='\$home/sitemap' aria-label='Site Map'><img class='tkt-fossil' src='\$home/logo' alt='Site Map'></a></li>\\n"
           builtin_request_js hbmenu.js
           set once 1
-          foreach {name url expr class} $mainmenu {
-            if {![capexpr $expr]} continue
-            if {$once && [string match $url\[/?#\]* /$current_page/]} {
-              set class "active $class"
+          foreach {name url expr class} \$mainmenu {
+            if {![capexpr \$expr]} continue
+            if {\$once && [string match \$url\\[/?#\\]* /\$current_page/]} {
+              set class "active \$class"
               set once 0
             }
-            html "<li class='$class'>"
-            if {[string match /* $url]} {set url $home$url}
-            html "<a href='$url'>$name</a></li>\n"
+            html "<li class='\$class'>"
+            if {[string match /* \$url]} {set url \$home\$url}
+            html "<a href='\$url'>\$name</a></li>\\n"
           }
         </th1>
-        <li><a id="tkt-theme" href="#">Dark</a></li>
-      </ul>
+        <li class="tkt-themeli"><a id="tkt-theme" href="#" title="Toggle dark mode"><svg class="tkt-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Dark"><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/></svg><svg class="tkt-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Light"><path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/></svg></a></li>
+$links      </ul>
     </nav>
     <nav id="hbdrop" class='hbdrop' title="sitemap"></nav>
   </div>
@@ -390,6 +506,65 @@ EOF
 # dark selectors are prefixed with html[data-theme=dark], which also outranks blitz's own rules
 skin_css() {
   cat <<'EOF'
+.mainmenu ul li.active { background-image: none; }
+/* blitz caps the page at 900px; use the window instead, with an 8% gutter each side */
+div.container { max-width: none; width: 84%; }
+/* page zoom slider, floated to the right end of the submenu; about as wide as the three menu icons above it */
+.submenu .tkt-zoom { float: right; width: 128px; margin: 0 15px; }
+.submenu .tkt-zoom input { width: 100%; margin: 0; vertical-align: middle; accent-color: #3b5c6b; cursor: pointer; }
+html[data-theme=dark] .submenu .tkt-zoom input { accent-color: #79b8d6; }
+/* report tables: blitz shrinks them to .9em with tight padding; give them body size, room, and row rules */
+.report td, .report th { font-size: 1em; padding: 7px 10px; border-bottom: 1px solid #e4e4e4; vertical-align: middle; }
+.report th { text-align: left; font-weight: 600; background-color: #f0f0f0; }
+.report tr:last-child td { border-bottom: 0; }
+table.report:not(.sortable) td { border-bottom: 0; }
+html[data-theme=dark] .report td, html[data-theme=dark] .report th { border-bottom-color: #30363d; }
+/* clickable facets in report cells filter the table; the current filter shows in a bar above it */
+a.tkt-facet { color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor; }
+a.tkt-facet:hover { border-bottom-style: solid; }
+.tkt-filterbar { margin: 0 0 0.6em; padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; background-color: #f0f0f0; }
+.tkt-filterbar b { margin-right: 0.4em; }
+.tkt-filterbar a { margin-right: 0.8em; }
+.tkt-filterbar a.tkt-clear { float: right; margin: 0; }
+tr.tkt-hide { display: none; }
+/* prism tokens; prism itself ships no theme here, so these are the whole palette */
+.token.comment, .token.prolog, .token.doctype, .token.cdata { color: #6a737d; font-style: italic; }
+.token.punctuation { color: #5c6370; }
+.token.property, .token.tag, .token.constant, .token.symbol, .token.deleted { color: #b3261e; }
+.token.boolean, .token.number { color: #9a5b00; }
+.token.selector, .token.attr-name, .token.string, .token.char, .token.builtin, .token.inserted { color: #1a7f37; }
+.token.operator, .token.entity, .token.url, .language-css .token.string, .style .token.string { color: #7a3e9d; }
+.token.atrule, .token.attr-value, .token.keyword { color: #0550ae; }
+.token.function, .token.class-name { color: #8250df; }
+.token.regex, .token.important, .token.variable { color: #b35900; }
+.token.important, .token.bold { font-weight: bold; }
+.token.italic { font-style: italic; }
+html[data-theme=dark] pre, html[data-theme=dark] pre.verbatim { border: 1px solid #30363d; }
+html[data-theme=dark] .token.comment, html[data-theme=dark] .token.prolog, html[data-theme=dark] .token.doctype, html[data-theme=dark] .token.cdata { color: #8b949e; }
+html[data-theme=dark] .token.punctuation { color: #a9b1ba; }
+html[data-theme=dark] .token.property, html[data-theme=dark] .token.tag, html[data-theme=dark] .token.constant, html[data-theme=dark] .token.symbol, html[data-theme=dark] .token.deleted { color: #ff7b72; }
+html[data-theme=dark] .token.boolean, html[data-theme=dark] .token.number { color: #f0b660; }
+html[data-theme=dark] .token.selector, html[data-theme=dark] .token.attr-name, html[data-theme=dark] .token.string, html[data-theme=dark] .token.char, html[data-theme=dark] .token.builtin, html[data-theme=dark] .token.inserted { color: #7ee787; }
+html[data-theme=dark] .token.operator, html[data-theme=dark] .token.entity, html[data-theme=dark] .token.url { color: #d2a8ff; }
+html[data-theme=dark] .token.atrule, html[data-theme=dark] .token.attr-value, html[data-theme=dark] .token.keyword { color: #79c0ff; }
+html[data-theme=dark] .token.function, html[data-theme=dark] .token.class-name { color: #d2a8ff; }
+html[data-theme=dark] .token.regex, html[data-theme=dark] .token.important, html[data-theme=dark] .token.variable { color: #ffa657; }
+.mainmenu li.tkt-hb, .mainmenu li.tkt-themeli { float: right; }
+.mainmenu li.tkt-themeli svg { vertical-align: -0.3em; }
+.mainmenu svg.tkt-sun { display: none; }
+html[data-theme=dark] .mainmenu svg.tkt-sun { display: inline; }
+html[data-theme=dark] .mainmenu svg.tkt-moon { display: none; }
+.mainmenu li a#hbbtn { padding-top: 4px; padding-bottom: 4px; }
+.mainmenu img.tkt-fossil { height: 1.5em; width: auto; vertical-align: middle; }
+html[data-theme=dark] .mainmenu img.tkt-fossil { filter: invert(0.9) hue-rotate(180deg); }
+.mainmenu li.tkt-github { float: right; position: relative; }
+.mainmenu li.tkt-github a#tkt-gh svg { vertical-align: -0.2em; }
+nav.tkt-ghdrop { display: none; position: absolute; right: 0; top: 100%; min-width: 8em; background-color: white; border: 2px solid #ccc; z-index: 20; }
+nav.tkt-ghdrop a { display: block; color: #3b5c6b; padding: 10px 15px; white-space: nowrap; }
+nav.tkt-ghdrop a:hover { background-color: #eee; }
+html[data-theme=dark] nav.tkt-ghdrop { background-color: #22272e; border-color: #30363d; }
+html[data-theme=dark] nav.tkt-ghdrop a { color: #c0c6cf; }
+html[data-theme=dark] nav.tkt-ghdrop a:hover { background-color: #2a3038; }
 html td.tktDspValue { background-color: transparent; }
 li:has(> a[href$="modreq"]) { display: none; }
 html[data-theme=dark] { color-scheme: dark; }
@@ -417,11 +592,23 @@ html[data-theme=dark] td, html[data-theme=dark] td.tktDspValue, html[data-theme=
 html[data-theme=dark] code, html[data-theme=dark] kbd, html[data-theme=dark] footer { border-color: #30363d; }
 html[data-theme=dark] td.tktDspValue, html[data-theme=dark] div.tktDspValue { background-color: transparent; }
 html[data-theme=dark] .report th { background-color: #22272e; color: #e6e9ed; }
-html[data-theme=dark] .report tr:not([style]):hover, html[data-theme=dark] .report thead+tbody tr:not([style]):hover { background-color: #2a3038 !important; }
-html[data-theme=dark] .report thead+tbody tr[style]:hover { background-color: #e8eef4 !important; }
-html[data-theme=dark] .report tr[style] td, html[data-theme=dark] .report tr[style] a,
-html[data-theme=dark] td[style*="background-color"] { color: #1b1f24; }
-html[data-theme=dark] .report tr[style] a { color: #0b3d5c; }
+html[data-theme=dark] .report thead+tbody tr:hover { background-color: #2a3038 !important; }
+/* report rows come with inline pastel backgrounds from the bgcolor column; map each known one to a dark tint,
+   after a catch-all so an unknown color still lands on a readable neutral */
+html[data-theme=dark] .report tr[style*="background-color"], html[data-theme=dark] td[style*="background-color"] { background-color: #2a2f36 !important; }
+html[data-theme=dark] .report tr[style*="#f2dcdc"], html[data-theme=dark] td[style*="#f2dcdc"] { background-color: #472a2a !important; }
+html[data-theme=dark] .report tr[style*="#bde5d6"], html[data-theme=dark] td[style*="#bde5d6"] { background-color: #1f3d3a !important; }
+html[data-theme=dark] .report tr[style*="#cfe8bd"], html[data-theme=dark] td[style*="#cfe8bd"] { background-color: #2c3d22 !important; }
+html[data-theme=dark] .report tr[style*="#cacae5"], html[data-theme=dark] td[style*="#cacae5"] { background-color: #2f2f4a !important; }
+html[data-theme=dark] .report tr[style*="#f8e6cc"], html[data-theme=dark] td[style*="#f8e6cc"] { background-color: #46341f !important; }
+html[data-theme=dark] .report tr[style*="#fdf5d6"], html[data-theme=dark] td[style*="#fdf5d6"] { background-color: #3f3a1e !important; }
+html[data-theme=dark] .report tr[style*="#e2f0d9"], html[data-theme=dark] td[style*="#e2f0d9"] { background-color: #23392a !important; }
+html[data-theme=dark] .report tr[style*="#e8e8e8"], html[data-theme=dark] td[style*="#e8e8e8"],
+html[data-theme=dark] .report tr[style*="#c8c8c8"], html[data-theme=dark] td[style*="#c8c8c8"] { background-color: #2a2f36 !important; }
+html[data-theme=dark] td[style*="#ffffff"] { background-color: transparent !important; }
+html[data-theme=dark] .report tr[style] td, html[data-theme=dark] td[style*="background-color"] { color: #d4d8de; }
+html[data-theme=dark] .report tr[style] a { color: #79b8d6; }
+html[data-theme=dark] .tkt-filterbar { background-color: #22272e; border-color: #30363d; }
 html[data-theme=dark] pre, html[data-theme=dark] pre.verbatim, html[data-theme=dark] textarea,
 html[data-theme=dark] input[type=text], html[data-theme=dark] input[type=search], html[data-theme=dark] input[type=password],
 html[data-theme=dark] select { background-color: #0f1216; color: #d4d8de; border-color: #30363d; }
@@ -448,7 +635,7 @@ INSERT INTO r VALUES('Open Tickets', '#ffffff Key:
        WHEN ''Important'' THEN ''#fdf5d6'' WHEN ''Minor'' THEN ''#e2f0d9'' ELSE ''#e8e8e8'' END AS ''bgcolor'',
   substr(tkt_uuid,1,10) AS ''#'',
   datetime(tkt_mtime) AS ''mtime'',
-  status, severity, tags, title
+  status, severity, subsystem, tags, title
 FROM ticket
 WHERE status IN (''Open'',''WIP'')
 ORDER BY CASE severity WHEN ''Critical'' THEN 0 WHEN ''Severe'' THEN 1 WHEN ''Important'' THEN 2 WHEN ''Minor'' THEN 3 ELSE 4 END, tkt_mtime DESC');
@@ -458,7 +645,7 @@ INSERT INTO r VALUES('Critical and Severe', '#ffffff Key:
   CASE severity WHEN ''Critical'' THEN ''#f2dcdc'' ELSE ''#f8e6cc'' END AS ''bgcolor'',
   substr(tkt_uuid,1,10) AS ''#'',
   datetime(tkt_mtime) AS ''mtime'',
-  status, severity, tags, title
+  status, severity, subsystem, tags, title
 FROM ticket
 WHERE status IN (''Open'',''WIP'') AND severity IN (''Critical'',''Severe'')
 ORDER BY severity, tkt_mtime DESC');
@@ -469,7 +656,7 @@ INSERT INTO r VALUES('Recent Activity', '#ffffff Key:
   CASE status WHEN ''Open'' THEN ''#f2dcdc'' WHEN ''WIP'' THEN ''#fdf5d6'' ELSE ''#c8c8c8'' END AS ''bgcolor'',
   substr(tkt_uuid,1,10) AS ''#'',
   datetime(tkt_mtime) AS ''mtime'',
-  status, severity, tags, title
+  status, severity, subsystem, tags, title
 FROM ticket
 WHERE tkt_mtime > julianday(''now'',''-30 days'')
 ORDER BY tkt_mtime DESC');
@@ -484,7 +671,7 @@ SELECT
   CASE t.status WHEN ''Open'' THEN ''#f2dcdc'' ELSE ''#fdf5d6'' END AS ''bgcolor'',
   s.tag AS ''tag'',
   substr(t.tkt_uuid,1,10) AS ''#'',
-  t.status, t.severity, t.title
+  t.status, t.severity, t.subsystem, t.title
 FROM split s JOIN ticket t ON t.tkt_id=s.tkt_id
 WHERE s.tag <> ''''
 ORDER BY s.tag, t.tkt_mtime DESC');
@@ -503,7 +690,7 @@ INSERT INTO r VALUES('Recently Closed', '#ffffff Key:
   ''#c8c8c8'' AS ''bgcolor'',
   substr(tkt_uuid,1,10) AS ''#'',
   datetime(tkt_mtime) AS ''closed'',
-  resolution, severity, tags, title
+  resolution, severity, subsystem, tags, title
 FROM ticket
 WHERE status=''Closed''
 ORDER BY tkt_mtime DESC LIMIT 100');
@@ -533,7 +720,7 @@ verb_init() {
   newpage >"$tmp/new"
   editpage >"$tmp/edit"
   skin_css >"$tmp/css"
-  skin_header >"$tmp/header"
+  skin_header "$(github_url || true)" >"$tmp/header"
   skin_footer >"$tmp/footer"
   skin_details >"$tmp/details"
   reports >"$tmp/reports"
@@ -548,12 +735,13 @@ verb_init() {
        "replace into config(name,value,mtime) values('footer',cast(readfile('$tmp/footer') as text),strftime('%s','now'));" \
        "replace into config(name,value,mtime) values('details',cast(readfile('$tmp/details') as text),strftime('%s','now'));" \
        "delete from config where name='default-skin';" \
+       "replace into config(name,value,mtime) values('default-csp',$(lit "$CSP"),strftime('%s','now'));" \
        ".read $tmp/reports" \
        "replace into config(name,value,mtime) values('tkt-version','$TKT_VERSION',strftime('%s','now'));"
   rm -rf "$tmp"
-  fx user capabilities nobody "$GUEST" >&2
-  fx user capabilities anonymous "$GUEST" >&2
-  fossil rebuild "$REPO" >&2
+  fx user capabilities nobody "$GUEST" >/dev/null
+  fx user capabilities anonymous "$GUEST" >/dev/null
+  fossil rebuild "$REPO" >/dev/null
   note "ready at $REPO"
 }
 
@@ -717,6 +905,36 @@ verb_list() {
   sqlq "select $COLS from ticket $filter order by tkt_mtime desc;" | paint
 }
 
+SEV_RANK="case severity when 'Critical' then 0 when 'Severe' then 1 when 'Important' then 2 when 'Minor' then 3 else 4 end"
+
+# the newest open tickets: short id, title, severity, subsystem. --triage keeps only the top severity present
+verb_todo() {
+  need
+  local n=10 triage= fmt=txt where sel q out
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --triage) triage=1 ;;
+      -f|--format) [ $# -gt 1 ] || die 'usage: tkt todo [N] [--triage] [-f txt|md|json]'; fmt=$2; shift ;;
+      --format=*) fmt=${1#*=} ;;
+      ''|*[!0123456789]*) die "usage: tkt todo [N] [--triage] [-f txt|md|json] (got: $1)" ;;
+      *) n=$1 ;;
+    esac
+    shift
+  done
+  where="status in ('Open','WIP')"
+  [ -z "$triage" ] || where="$where and $SEV_RANK = (select min($SEV_RANK) from ticket where status in ('Open','WIP'))"
+  sel="substr(tkt_uuid,1,10) as id, coalesce(nullif(title,''),'(untitled)') as title, coalesce(nullif(severity,''),'-') as severity, coalesce(nullif(subsystem,''),'-') as subsystem"
+  q="select $sel from ticket where $where order by tkt_mtime desc, tkt_id desc limit $n;"
+  case "$fmt" in
+    txt) printf '.mode list\n.headers off\n.separator " | "\n%s\n' "$q" | fossil sql -R "$REPO" | paint ;;
+    md|markdown) printf '.mode markdown\n%s\n' "$q" | fossil sql -R "$REPO" ;;
+    json) out=$(printf '.mode json\n%s\n' "$q" | fossil sql -R "$REPO"); printf '%s\n' "${out:-[]}" ;;
+    *) die "unknown format: $fmt (known: txt md json)" ;;
+  esac
+}
+
+verb_triage() { verb_todo --triage "$@"; }
+
 verb_search() {
   need
   [ $# -gt 0 ] || die 'usage: tkt search <text>'
@@ -725,9 +943,26 @@ verb_search() {
   sqlq "select $COLS from ticket where lower(coalesce(title,'') || ' ' || coalesce(description,'')) like lower($pat) or tkt_id in (select tkt_id from ticketchng where lower(coalesce(icomment,'')) like lower($pat)) order by tkt_mtime desc;" | paint
 }
 
+# TKT_PORT from a .env beside the tracker, for a project-local default under the environment; the file is read, never sourced
+dotenv_port() {
+  local f=$(dirname "$REPO")/.env line
+  [ -f "$f" ] || return 0
+  line=$(grep -E '^(export[[:space:]]+)?TKT_PORT=' "$f" | tail -n 1) || return 0
+  line=${line#*=}
+  line=${line%%[[:space:]]#*}
+  line=${line%"${line##*[![:space:]]}"}
+  case "$line" in \"*\") line=${line#\"}; line=${line%\"} ;; \'*\') line=${line#\'}; line=${line%\'} ;; esac
+  printf '%s' "$line"
+}
+
+# something already listening on the port; this tracker's own server is stopped before this runs
+busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# port= on the command line, else TKT_PORT in the environment, else TKT_PORT in .env beside the tracker, else 9080
 port_of() {
   kv port "$@"
-  local at=${kv_port:-${TKT_PORT:-9080}}
+  local at=${kv_port:-${TKT_PORT:-$(dotenv_port)}}
+  at=${at:-9080}
   case "$at" in ''|*[!0123456789]*) die "not a port: $at" ;; esac
   printf '%s' "$at"
 }
@@ -751,14 +986,58 @@ halt() {
   note "stopped the server on port $port (pid $pid)"
 }
 
+# refresh the header so the github links track the current origin remote
+install_header() {
+  local tmp
+  tmp=$(mktemp)
+  skin_header "$(github_url || true)" >"$tmp"
+  sqlq "replace into config(name,value,mtime) values('header',cast(readfile('$tmp') as text),strftime('%s','now'));"
+  rm -f "$tmp"
+}
+
+# hand a url to the platform's opener: $BROWSER first, then the system's own, then python's webbrowser module.
+# quiet, and false when nothing works
+launch() {
+  local url=$1
+  if [ -n "${BROWSER:-}" ]; then "$BROWSER" "$url" && return; fi
+  case "$(uname -s)" in
+    Darwin) open "$url" && return ;;
+    MINGW*|MSYS*|CYGWIN*) start "" "$url" && return ;;
+    *) if command -v xdg-open >/dev/null; then xdg-open "$url" && return
+       elif command -v wslview >/dev/null; then wslview "$url" && return
+       elif command -v powershell.exe >/dev/null; then powershell.exe -NoProfile -Command "Start-Process '$url'" && return; fi ;;
+  esac
+  local py
+  for py in python3 python; do
+    command -v "$py" >/dev/null || continue
+    "$py" -m webbrowser -t "$url" && return
+  done
+  return 1
+} >/dev/null 2>&1
+
+# open the browser once the server answers, from a background job so the foreground exec can proceed.
+# only on a terminal, since agents and scripts print the url instead; TKT_OPEN=0 turns it off
+open_when_up() {
+  local at=$1 url=$2 n=0
+  [ -t 1 ] && [ "${TKT_OPEN:-1}" != 0 ] || return 0
+  (
+    while ! busy "$at"; do sleep 0.1; n=$((n + 1)); [ $n -lt 100 ] || exit 1; done
+    launch "$url"
+  ) </dev/null >/dev/null 2>&1 &
+}
+
 verb_serve() {
   need
-  local at
+  local at url
   at=$(port_of "$@")
   halt || true
+  ! busy "$at" || die "port $at is taken, likely by another project's tkt serve; pass port=<n>, or set TKT_PORT in the environment or in $(dirname "$REPO")/.env"
+  install_header
   printf '%s %s\n' "$$" "$at" >"$REPO.pid"
-  printf 'http://localhost:%s/ticket\n' "$at"
+  url=http://localhost:$at/ticket
+  printf '%s\n' "$url"
   note "serving $REPO in the foreground as pid $$; Ctrl-C or tkt stop ends it"
+  open_when_up "$at" "$url"
   exec fossil server "$REPO" --port "$at" --localhost --localauth
 }
 
@@ -889,6 +1168,8 @@ cat /tmp/ticket-body.md | tkt new title='foo explodes'
 | --- | --- |
 | Read one ticket | `tkt show <id>` |
 | List open tickets | `tkt list`, or `tkt list status=all tag=<word>` |
+| What to work on | `tkt todo`, the 10 newest open tickets; `tkt todo 5 -f json` for fewer, as json |
+| What is most urgent | `tkt triage`, only the top severity present among open tickets |
 | Find a ticket | `tkt search <text>` |
 | Restate the problem | `tkt edit <id> <<'EOF'` ... |
 | Add to the record | `tkt comment <id> <<'EOF'` ... |
@@ -984,6 +1265,11 @@ Each tracker has one server: a new `tkt serve`, from any terminal, stops the old
   `tkt serve` as a background command, and tell the human three things: the url, that the
   server runs inside this session, and that running `tkt serve` in their own terminal
   takes it over there, in the foreground where they can watch and Ctrl-C it.
+- **Port:** the default is 9080 for every project, so `serve` fails with `port ... is taken`
+  when another project is already serving. Do not stop that other server. Pick a free port
+  and pass it, `tkt serve port=9081`, and tell the human that adding `TKT_PORT=9081` to the
+  project's `.env` beside `.tkt.fossil` makes it the default. Never edit `.env` yourself
+  unless asked. `TKT_PORT` in the environment beats `.env`, and `port=` beats both.
 - **Stop:** `tkt stop` works from anywhere.
 - **What the human can do there:** file, edit, comment on, close, and reopen tickets.
   Blockers are command-line only.
@@ -1022,7 +1308,7 @@ main() {
     help|-h|--help) usage; return ;;
     version|--version) printf 'tkt %s\n' "$TKT_VERSION"; return ;;
     skill) verb_skill "$@"; return ;;
-    init|new|show|list|search|edit|comment|tag|block|set|close|clean|serve|stop|status|sql|run) ;;
+    init|new|show|list|search|todo|triage|edit|comment|tag|block|set|close|clean|serve|stop|status|sql|run) ;;
     *) usage >&2; die "unknown verb: $verb" ;;
   esac
   locate
