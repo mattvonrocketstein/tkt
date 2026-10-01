@@ -4,8 +4,13 @@ PYTHON ?= python3
 VENV ?= .venv
 SCRIPT ?= tkt
 SKILL ?= skills/tkt/SKILL.md
+DOCS_PAGES ?= README.md $(wildcard docs/*.md)
+DOCS_IMG ?= docs/img/hdr
+DOCS_REPO ?= mattvonrocketstein/tkt
+DOCS_PORT ?= 6419
+MDHEADERS = $(PYTHON) docs/tools/mdheaders.py --img $(DOCS_IMG)
 
-.PHONY: clean init build test install skill
+.PHONY: clean init build test install skill docs.headers docs.check docs.test docs.serve
 .SILENT:
 
 clean:
@@ -48,3 +53,18 @@ install:
 	     echo "or install system-wide instead:"; \
 	     echo "  sudo make install PREFIX=/usr/local" ;; \
 	esac
+
+docs.headers:
+	$(MDHEADERS) $(DOCS_PAGES)
+
+docs.check:
+	$(MDHEADERS) --check $(DOCS_PAGES) \
+	  || { echo "tkt: a docs header is out of date, run make docs.headers" >&2; exit 1; }
+
+docs.test: init
+	$(VENV)/bin/pytest -q -p no:cacheprovider docs/tools
+
+docs.serve:
+	command -v gh >/dev/null || { echo "tkt: docs.serve renders through gh api, and gh is not on PATH" >&2; exit 1; }
+	echo "tkt: serving docs at http://localhost:$(DOCS_PORT)/" >&2
+	$(PYTHON) docs/tools/preview.py $(DOCS_REPO) $(DOCS_PORT)
