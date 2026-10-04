@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 .tkt.fossil*
 .env
+docs/img/src-*/

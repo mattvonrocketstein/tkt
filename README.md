@@ -1,14 +1,9 @@
-<table align="center">
-  <tr>
-    <td id="title"><strong>tkt</strong></td>
-    <td id="mini-toc" align=right><a href="#why">Why</a> | <a href="#install">Install</a> | <a href="#config">Config</a> | <a href="#usage">Usage</a> | <a href="#web-ui">Web UI</a> | <a href="#agents">Agents</a> | <a href="#dev">Dev</a></td>
-  </tr>
-  <tr>
-    <td id="logo" width=15%><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/icon-dark.svg"><img src="docs/img/icon.svg" width="96" alt="tkt"></picture></td>
-    <td id="blurb" align=center>
-<strong>tkt</strong> is a small alternative front-end to <a href=https://fossil-scm.org>fossil's</a> built-in <a href=https://fossil-scm.org/home/doc/trunk/www/bugtheory.wiki>bug tracker</a>.    </td>
-  </tr>
-</table>
+<!-- header tkt "tkt" | Why #why | Install #install | Config #config | Usage #usage | Web UI #web-ui | Agents #agents | Dev #dev -->
+<p align="right"><a id="tkt"></a><a href="#tkt"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.title.dark.svg"><img align=left src="docs/img/hdr/readme.tkt.title.svg" alt="tkt"></picture></a><a href="#why"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.0.dark.svg"><img src="docs/img/hdr/readme.tkt.0.svg" alt="Why"></picture></a><a href="#install"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.1.dark.svg"><img src="docs/img/hdr/readme.tkt.1.svg" alt="Install"></picture></a><a href="#config"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.2.dark.svg"><img src="docs/img/hdr/readme.tkt.2.svg" alt="Config"></picture></a><a href="#usage"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.3.dark.svg"><img src="docs/img/hdr/readme.tkt.3.svg" alt="Usage"></picture></a><a href="#web-ui"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.4.dark.svg"><img src="docs/img/hdr/readme.tkt.4.svg" alt="Web UI"></picture></a><a href="#agents"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.5.dark.svg"><img src="docs/img/hdr/readme.tkt.5.svg" alt="Agents"></picture></a><a href="#dev"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.6.dark.svg"><img src="docs/img/hdr/readme.tkt.6.svg" alt="Dev"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
+<!-- /header -->
+
+<p><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/icon-dark.svg"><img align=middle src="docs/img/icon.svg" width="96" alt="tkt"></picture>
+&nbsp;&nbsp; a small alternative front-end to <a href=https://fossil-scm.org>fossil's</a> built-in <a href=https://fossil-scm.org/home/doc/trunk/www/bugtheory.wiki>bug tracker</a>.</p>
 
 Fossil's great! A single-file tool, uses SQL under the hood, and the tracker supports a simple CLI / a Web UI / markdown out of the box.
 
@@ -19,8 +14,11 @@ Fossil's great! A single-file tool, uses SQL under the hood, and the tracker sup
 tkt init
 cat repro.md | tkt new title='widget explodes' tags='compiler oop'
 tkt list
-tkt todo 5
 tkt show 896eb890
+
+# Query by recents, or severity
+tkt todo 5
+tkt triage 5
 
 # Read-only SQL
 echo "select status, count(*) as n from ticket group by status;" | tkt sql
@@ -29,14 +27,9 @@ echo "select status, count(*) as n from ticket group by status;" | tkt sql
 tkt serve
 ```
 
-See [Usage](#usage) for more, but you get the idea.  
-
-Ideal for ultralight in-project or offline usage by human(s). 
-
-Also ideal for [agents](#agents), who are already bash / SQL natives anyway. 
+See [Usage](#usage) for more, but you get the idea.  Ideal for ultralight in-project or offline usage by human(s). Also ideal for [agents](#agents), who are already bash / SQL natives anyway. 
 
 This is about as simple as it gets.  One tool, many workflows, no hassle with auth or APIs.  Track the DB to share tickets with other devs.  Ignore the DB for a private local, no clutter on jira/github issues.  You can even use it *per task* for complex work that needs more structure than a TODO list.. and then just throw away the tracker when you're done.
-
 
 <!-- header why "Why" | The Big One #the-big-one | The Other Ones #the-other-ones -->
 <p align="right"><a id="why"></a><a href="#why"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.why.title.dark.svg"><img align=left src="docs/img/hdr/readme.why.title.svg" alt="Why"></picture></a><a href="#the-big-one"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.why.0.dark.svg"><img src="docs/img/hdr/readme.why.0.svg" alt="The Big One"></picture></a><a href="#the-other-ones"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.why.1.dark.svg"><img src="docs/img/hdr/readme.why.1.svg" alt="The Other Ones"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
@@ -79,11 +72,12 @@ chmod +x ~/.local/bin/tkt
 make install
 ```
 
-<!-- header config "Config" | Location #location | Environment #env | Existing Repos #existing-repos -->
-<p align="right"><a id="config"></a><a href="#config"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.title.dark.svg"><img align=left src="docs/img/hdr/readme.config.title.svg" alt="Config"></picture></a><a href="#location"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.0.dark.svg"><img src="docs/img/hdr/readme.config.0.svg" alt="Location"></picture></a><a href="#env"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.1.dark.svg"><img src="docs/img/hdr/readme.config.1.svg" alt="Environment"></picture></a><a href="#existing-repos"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.2.dark.svg"><img src="docs/img/hdr/readme.config.2.svg" alt="Existing Repos"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
+<!-- header config "Config" | Tracker #location | Environment #env | Existing Repos #existing-repos -->
+<p align="right"><a id="config"></a><a href="#config"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.title.dark.svg"><img align=left src="docs/img/hdr/readme.config.title.svg" alt="Config"></picture></a><a href="#location"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.0.dark.svg"><img src="docs/img/hdr/readme.config.0.svg" alt="Tracker"></picture></a><a href="#env"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.1.dark.svg"><img src="docs/img/hdr/readme.config.1.svg" alt="Environment"></picture></a><a href="#existing-repos"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.2.dark.svg"><img src="docs/img/hdr/readme.config.2.svg" alt="Existing Repos"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
 <!-- /header -->
 
 <a id="location"></a>
+
 ### Tracker Location
 
 The tracker is one fossil repository file, `.tkt.fossil`. `tkt` uses the first of:
@@ -102,9 +96,8 @@ tkt init
 
 The `tkt init` command is idempotent and also migrates: when `tkt` gains a field, every verb refuses with the field name until you run `tkt init` again.
 
-A tracker created under the old default name, `.fossil.db`, is refused with a message rather than silently replaced by a new empty one. Rename it to `.tkt.fossil`, or point `TKT_DB` at it.
-
 <a id="env"></a>
+
 ### Environment
 
 | Variable | Default | Purpose |
