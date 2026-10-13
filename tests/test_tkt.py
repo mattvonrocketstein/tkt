@@ -187,6 +187,11 @@ class TestInit:
         tkt.ok("init")
         assert "survives reinit" in tkt.show(a)
 
+    def test_reinit_keeps_custom_ticket_common(self, tkt):
+        tkt.sql("update config set value='set subsystem_choices {mine}' where name='ticket-common';")
+        tkt.ok("init")
+        assert config(tkt.db, "ticket-common") == "set subsystem_choices {mine}"
+
     def test_writes_version_row(self, tkt):
         assert re.fullmatch(r"\d+\.\d+\.\d+", config(tkt.db, "tkt-version"))
 
@@ -237,6 +242,9 @@ class TestInit:
         assert "function facets()" in config(tkt.db, "header") and "function zoomSlider()" in config(tkt.db, "header")
         assert "div.container { max-width: none; width: 84%; }" in css and ".submenu .tkt-zoom" in css
         assert tkt.sql("select count(*) from reportfmt where owner='tkt' and sqlcode like '%subsystem%';") == "5"
+        common = config(tkt.db, "ticket-common")
+        assert "set subsystem_choices {\n  automation\n  tests\n  docs\n  cli\n  devx\n  ux\n  ui\n}" in common
+        assert "Code_Defect" in common
         assert config(tkt.db, "footer") and config(tkt.db, "details")
         titles = tkt.sql("select title from reportfmt order by title;").split("\n")
         for t in ("All Tickets", "Open Tickets", "Critical and Severe", "Recent Activity", "By Tag", "Blocked", "Recently Closed"):

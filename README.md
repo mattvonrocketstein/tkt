@@ -193,6 +193,8 @@ $ tkt new title=x subsytem=core
 tkt: unknown field: subsytem (known: title type status severity priority subsystem tags foundin)
 ```
 
+`tkt init` offers `automation`, `tests`, `docs`, `cli`, `devx`, `ux`, and `ui` as subsystems in the web ui. Change the list under Admin > Tickets > Common; a later `tkt init` keeps your version.
+
 Any unique uuid prefix works as an `<id>`. An ambiguous or unknown prefix fails.
 
 <a id="descriptions"></a>
@@ -250,6 +252,15 @@ The `show`, `list`, `search`, and `todo` verbs print markdown, and `todo` also t
 <!-- header web-ui "Web UI" | Serving #serving | What Init Changes #init-changes -->
 <p align="right"><a id="web-ui"></a><a href="#web-ui"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.web-ui.title.dark.svg"><img align=left src="docs/img/hdr/readme.web-ui.title.svg" alt="Web UI"></picture></a><a href="#serving"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.web-ui.0.dark.svg"><img src="docs/img/hdr/readme.web-ui.0.svg" alt="Serving"></picture></a><a href="#init-changes"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.web-ui.1.dark.svg"><img src="docs/img/hdr/readme.web-ui.1.svg" alt="What Init Changes"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
 <!-- /header -->
+
+<a id="gallery"></a>
+### Gallery
+
+<table align=center>
+<tr><td align="center"><a href="docs/img/shots/index-light.png"><img src="docs/img/shots/index-light.png" width="260" alt="All tickets, light"></a><br><sub>All tickets, light</sub></td><td align="center"><a href="docs/img/shots/index-dark.png"><img src="docs/img/shots/index-dark.png" width="260" alt="All tickets, dark"></a><br><sub>All tickets, dark</sub></td><td align="center"><a href="docs/img/shots/report-activity.png"><img src="docs/img/shots/report-activity.png" width="260" alt="Recent activity"></a><br><sub>Recent activity</sub></td></tr>
+<tr><td align="center"><a href="docs/img/shots/detail-light.png"><img src="docs/img/shots/detail-light.png" width="260" alt="Ticket detail"></a><br><sub>Ticket detail</sub></td><td align="center"><a href="docs/img/shots/detail-dark.png"><img src="docs/img/shots/detail-dark.png" width="260" alt="Ticket detail, dark"></a><br><sub>Ticket detail, dark</sub></td><td align="center"><a href="docs/img/shots/detail-blocked.png"><img src="docs/img/shots/detail-blocked.png" width="260" alt="Blocked ticket"></a><br><sub>Blocked ticket</sub></td></tr>
+<tr><td align="center"><a href="docs/img/shots/report-open.png"><img src="docs/img/shots/report-open.png" width="260" alt="Open tickets"></a><br><sub>Open tickets</sub></td><td align="center"><a href="docs/img/shots/report-tags.png"><img src="docs/img/shots/report-tags.png" width="260" alt="By tag"></a><br><sub>By tag</sub></td><td align="center"><a href="docs/img/shots/new-ticket.png"><img src="docs/img/shots/new-ticket.png" width="260" alt="New ticket"></a><br><sub>New ticket</sub></td></tr>
+</table>
 
 <a id="serving"></a>
 ### Serving

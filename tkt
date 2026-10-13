@@ -188,6 +188,65 @@ CREATE INDEX ticketchng_idx1 ON ticketchng(tkt_id, tkt_mtime);
 EOF
 }
 
+# fossil's default ticket-common with tkt's subsystems filled in; init writes it only when the tracker has none
+common() {
+  cat <<'EOF'
+set type_choices {
+   Code_Defect
+   Build_Problem
+   Documentation
+   Feature_Request
+   Incident
+}
+set priority_choices {
+  Immediate
+  High
+  Medium
+  Low
+  Zero
+}
+set severity_choices {
+  Critical
+  Severe
+  Important
+  Minor
+  Cosmetic
+}
+set resolution_choices {
+  Open
+  Fixed
+  Rejected
+  Workaround
+  Unable_To_Reproduce
+  Works_As_Designed
+  External_Bug
+  Not_A_Bug
+  Duplicate
+  Overcome_By_Events
+  Drive_By_Patch
+  Misconfiguration
+}
+set status_choices {
+  Open
+  Verified
+  Review
+  Deferred
+  Fixed
+  Tested
+  Closed
+}
+set subsystem_choices {
+  automation
+  tests
+  docs
+  cli
+  devx
+  ux
+  ui
+}
+EOF
+}
+
 view() {
   cat <<'EOF'
 <th1>
@@ -716,6 +775,7 @@ verb_init() {
   fi
   tmp=$(mktemp -d)
   schema >"$tmp/schema"
+  common >"$tmp/common"
   view >"$tmp/view"
   newpage >"$tmp/new"
   editpage >"$tmp/edit"
@@ -725,6 +785,7 @@ verb_init() {
   skin_details >"$tmp/details"
   reports >"$tmp/reports"
   sqlq "replace into config(name,value,mtime) values('ticket-table',cast(readfile('$tmp/schema') as text),strftime('%s','now'));" \
+       "insert or ignore into config(name,value,mtime) values('ticket-common',cast(readfile('$tmp/common') as text),strftime('%s','now'));" \
        "replace into config(name,value,mtime) values('ticket-viewpage',cast(readfile('$tmp/view') as text),strftime('%s','now'));" \
        "replace into config(name,value,mtime) values('ticket-newpage',cast(readfile('$tmp/new') as text),strftime('%s','now'));" \
        "replace into config(name,value,mtime) values('ticket-editpage',cast(readfile('$tmp/edit') as text),strftime('%s','now'));" \
