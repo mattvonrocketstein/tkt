@@ -354,6 +354,14 @@ With no arguments, `tkt skill` prints the skill instead of installing it. Workin
 ln -s ~/code/tkt/skills/tkt ~/.claude/skills/tkt
 ```
 
+The skill follows the [Agent Skills](https://agentskills.io) format, so [pi](https://pi.dev) can use the same install. Point pi at the Claude Code skills directory in `~/.pi/agent/settings.json`:
+
+```json
+{ "skills": ["~/.claude/skills"] }
+```
+
+For a `--project` install, use `{ "skills": ["../.claude/skills"] }` in `.pi/settings.json` instead, since that path resolves relative to `.pi`.
+
 <a id="dev"></a>
 ## Development
 
