@@ -256,8 +256,20 @@ html "<h2>[htmlize $title]</h2>\n"
 <tr><td class="tktDspLabel">Ticket:</td><td class="tktDspValue">$<tkt_uuid></td></tr>
 <tr><td class="tktDspLabel">State:</td><td class="tktDspValue">$<status> &middot; $<type> &middot; $<severity></td></tr>
 <tr><td class="tktDspLabel">Subsystem:</td><td class="tktDspValue">$<subsystem></td></tr>
-<tr><td class="tktDspLabel">Tags:</td><td class="tktDspValue">$<tags></td></tr>
-<tr><td class="tktDspLabel">Blocked by:</td><td class="tktDspValue">$<blockers></td></tr>
+<tr><td class="tktDspLabel">Tags:</td><td class="tktDspValue"><th1>
+for {set i 0} {$i < [llength $tags]} {set i [expr {$i+1}]} {
+  set t [lindex $tags $i]
+  html "<a href=\"$home/rptview?title=By+Tag#tag=[httpize $t]\">[htmlize $t]</a> "
+}
+</th1></td></tr>
+<tr><td class="tktDspLabel">Blocked by:</td><td class="tktDspValue"><th1>
+for {set i 0} {$i < [llength $blockers]} {set i [expr {$i+1}]} {
+  set b [lindex $blockers $i]
+  query {SELECT substr(tkt_uuid,1,10) AS bid, title AS btitle FROM ticket WHERE tkt_uuid LIKE $b || '%'} {
+    html "<a href=\"$home/tktview/$bid\">$bid</a> [htmlize $btitle]<br>\n"
+  }
+}
+</th1></td></tr>
 <tr><td class="tktDspLabel">Found in:</td><td class="tktDspValue">$<foundin></td></tr>
 <tr><td class="tktDspLabel">Resolution:</td><td class="tktDspValue">$<resolution></td></tr>
 </table>
@@ -441,13 +453,24 @@ $prism<script nonce="\$nonce">
   // the filter lives in the url hash, so a filtered view can be bookmarked or shared
   function facets(){
     var t=document.querySelector('table.report.sortable')||document.querySelector('table.report thead')&&document.querySelector('table.report thead').parentNode; if(!t||!t.tHead||!t.tBodies.length) return;
-    var multi={tags:1,tag:1,'blocked by':1}, keys={status:1,severity:1,subsystem:1,type:1,priority:1,resolution:1,tags:1,tag:1,'blocked by':1};
+    var multi={tags:1,tag:1}, keys={status:1,severity:1,subsystem:1,type:1,priority:1,resolution:1,tags:1,tag:1};
     var heads=[].map.call(t.tHead.rows[0].cells,function(h){return h.textContent.trim().toLowerCase();});
     var rows=[].slice.call(t.tBodies[0].rows);
     function parse(){ var f={}; location.hash.slice(1).split('&').forEach(function(p){ var i=p.indexOf('='); if(i>0) f[decodeURIComponent(p.slice(0,i))]=decodeURIComponent(p.slice(i+1)); }); return f; }
     // fossil pages carry a base href, so hash links must spell out the page path or they leave the page
     function href(f){ var q=[]; for(var k in f) q.push(encodeURIComponent(k)+'='+encodeURIComponent(f[k])); return location.pathname+location.search+'#'+q.join('&'); }
     function words(c,k){ var v=c.textContent.trim(); return multi[k]?v.split(/\s+/).filter(Boolean):(v?[v]:[]); }
+    // blocked by holds one 'id title' line per blocker; each becomes a link to that ticket
+    var bi=heads.indexOf('blocked by');
+    if(bi>=0) rows.forEach(function(r){
+      var c=r.cells[bi]; if(!c||c.querySelector('a')) return;
+      var ls=c.textContent.split('\n').map(function(l){return l.trim();}).filter(Boolean); c.textContent='';
+      ls.forEach(function(l,j){
+        var id=l.slice(0,10), a=document.createElement('a'); a.href='tktview/'+id; a.textContent=id;
+        if(j) c.appendChild(document.createElement('br'));
+        c.appendChild(a); c.appendChild(document.createTextNode(l.slice(10)));
+      });
+    });
     rows.forEach(function(r){
       heads.forEach(function(k,i){
         var c=r.cells[i]; if(!keys[k]||!c||c.querySelector('a')) return;
@@ -572,6 +595,9 @@ div.container { max-width: none; width: 84%; }
 .submenu .tkt-zoom { float: right; width: 128px; margin: 0 15px; }
 .submenu .tkt-zoom input { width: 100%; margin: 0; vertical-align: middle; accent-color: #3b5c6b; cursor: pointer; }
 html[data-theme=dark] .submenu .tkt-zoom input { accent-color: #79b8d6; }
+/* the ticket view's field table spans the page; the label column stays as narrow as its text */
+table.label-value { width: 100%; }
+table.label-value td.tktDspLabel { width: 1%; white-space: nowrap; }
 /* report tables: blitz shrinks them to .9em with tight padding; give them body size, room, and row rules */
 .report td, .report th { font-size: 1em; padding: 7px 10px; border-bottom: 1px solid #e4e4e4; vertical-align: middle; }
 .report th { text-align: left; font-weight: 600; background-color: #f0f0f0; }
@@ -740,8 +766,11 @@ INSERT INTO r VALUES('Blocked', '#ffffff Key:
   CASE status WHEN ''Open'' THEN ''#f2dcdc'' ELSE ''#fdf5d6'' END AS ''bgcolor'',
   substr(tkt_uuid,1,10) AS ''#'',
   datetime(tkt_mtime) AS ''mtime'',
-  status, severity, blockers AS ''blocked by'', title
-FROM ticket
+  status, severity,
+  (SELECT group_concat(substr(b.tkt_uuid,1,10) || '' '' || coalesce(b.title,''''), char(10)) FROM ticket b
+    WHERE '' '' || t.blockers || '' '' LIKE ''% '' || substr(b.tkt_uuid,1,10) || '' %'') AS ''blocked by'',
+  title
+FROM ticket t
 WHERE status IN (''Open'',''WIP'') AND trim(coalesce(blockers,'''')) <> ''''
 ORDER BY tkt_mtime DESC');
 INSERT INTO r VALUES('Recently Closed', '#ffffff Key:
