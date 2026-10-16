@@ -252,13 +252,13 @@ class TestInit:
         assert tkt.sql("select count(*) from reportfmt where owner='tkt' and (sqlcode like '%bgcolor%' or cols <> '');") == "0"
         assert "function facets()" in config(tkt.db, "header") and "function zoomButtons()" in config(tkt.db, "header")
         assert "div.container { max-width: none; width: 84%; }" in css and "header .container { display: flex;" in css
-        assert tkt.sql("select count(*) from reportfmt where owner='tkt' and sqlcode like '%subsystem%';") == "6"
+        assert tkt.sql("select count(*) from reportfmt where owner='tkt' and sqlcode like '%subsystem%';") == "7"
         common = config(tkt.db, "ticket-common")
         assert "set subsystem_choices {\n  automation\n  tests\n  docs\n  cli\n  devx\n  ux\n  ui\n}" in common
         assert "Code_Defect" in common
         assert config(tkt.db, "footer") and config(tkt.db, "details")
         titles = tkt.sql("select title from reportfmt order by title;").split("\n")
-        for t in ("All Tickets", "Open Tickets", "Critical and Severe", "Recent Activity", "By Tag", "Blocked", "Recently Closed", "Tagged Tickets"):
+        for t in ("All Tickets", "Open Tickets", "Critical and Severe", "Recent Activity", "By Tag", "Blocked", "Recently Closed", "Tagged Tickets", "By State"):
             assert t in titles
         assert 'name="description"' in config(tkt.db, "ticket-newpage")
         edit = config(tkt.db, "ticket-editpage")
