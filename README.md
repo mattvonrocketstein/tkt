@@ -172,6 +172,7 @@ For the browser, see [Web UI](#web-ui).
 | `tkt comment <id>` | Add a comment from stdin or `$EDITOR` |
 | `tkt tag <id> <tag...>` | Replace the tag set; `--clear` empties it |
 | `tkt block <id> <id...>` | Replace what the ticket waits on; `--clear` empties it |
+| `tkt parent <id> <id>` | Make the ticket a subtask of another; `--clear` removes it |
 | `tkt set <id> <field> [value...]` | Write one other field; the value comes from arguments or stdin |
 | `tkt close <id> [resolution=...]` | Close the ticket; stdin is the closing comment; resolution defaults to `Fixed` |
 | `tkt clean [--force]` | Purge closed tickets after listing them and asking; `--force` skips the prompt; undo with `tkt run purge undo <id>` |
@@ -200,7 +201,7 @@ Any unique uuid prefix works as an `<id>`. An ambiguous or unknown prefix fails.
 <a id="descriptions"></a>
 ### Descriptions and Comments
 
-Fossil appends to a ticket field only when its name carries a leading plus. The schema `tkt` installs adds three ordinary fields: `description`, `tags`, and `blockers`. Setting any of them replaces the old value, while `icomment` stays the append-only comment log.
+Fossil appends to a ticket field only when its name carries a leading plus. The schema `tkt` installs adds four ordinary fields: `description`, `tags`, `blockers`, and `parent`. Setting any of them replaces the old value, while `icomment` stays the append-only comment log.
 
 That split is the whole design. A ticket reads as one current statement of the problem, with the discussion beside it. **No verb except `run` shuns an artifact or rebuilds history**, so earlier versions of a description stay reachable:
 
@@ -220,6 +221,14 @@ There are two kinds, stored differently.
 ```bash
 tkt block 896eb890 a39d7663e6 0991582b19
 tkt block 896eb890 --clear
+```
+
+**Subtasks** are one level deep, held in the `parent` field as a single ten-char id. A parent cannot have a parent, and a ticket with subtasks cannot become one, so there are no cycles or trees to reason about. `tkt show` lists a ticket's `Parent` or its `Subtasks`, and the subtasks of one parent are its siblings. A parent with open subtasks counts as blocked in the Blocked report, without anything being written to its `blockers`. Closing it still works, with a note naming how many subtasks are open.
+
+```bash
+tkt parent a39d7663e6 896eb890
+tkt new title='port the lexer' parent=896eb890
+tkt list parent=896eb890
 ```
 
 **Prose references** are any `[](<uuid>)` in a description or comment. That is markdown link format 8, where the url becomes the display text, so the hash renders as a link. On the way in, `tkt` rewrites a bare `[<uuid>]` into that form. Fossil indexes these references itself, and `tkt show` lists them under `Referenced by`.
@@ -315,7 +324,7 @@ Running `tkt init` trims the web UI down to a tracker:
 | New ticket form | The body goes to the description, and tags can be set |
 | Edit form | Appends a markdown comment, and replaces the description in place |
 
-Blockers stay command-line only, since `tkt block` is what checks the ids.
+Blockers and parents stay command-line only, since `tkt block` and `tkt parent` are what check the ids.
 
 <!-- header agents "Agents & AI" | Rules for Agents #agent-rules | Claude Code Skill #skill -->
 <p align="right"><a id="agents"></a><a href="#agents"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.agents.title.dark.svg"><img align=left src="docs/img/hdr/readme.agents.title.svg" alt="Agents &amp; AI"></picture></a><a href="#agent-rules"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.agents.0.dark.svg"><img src="docs/img/hdr/readme.agents.0.svg" alt="Rules for Agents"></picture></a><a href="#skill"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.agents.1.dark.svg"><img src="docs/img/hdr/readme.agents.1.svg" alt="Claude Code Skill"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>

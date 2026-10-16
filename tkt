@@ -4,7 +4,7 @@
 set -eo pipefail
 
 TKT_VERSION=0.1.0
-FIELDS='tags blockers description'
+FIELDS='tags blockers parent description'
 GUEST=hjr
 MENU="Tickets /ticket r {} Admin /setup {a s} desktoponly Logout /logout L desktoponly Login /login !L desktoponly"
 COLS="substr(tkt_uuid,1,10) || ' | ' || coalesce(nullif(status,''),'-') || ' | ' || coalesce(nullif(severity,''),'-') || ' | ' || coalesce(nullif(trim(tags),''),'-') || ' | ' || coalesce(nullif(title,''),'(untitled)')"
@@ -40,7 +40,7 @@ tkt: a ticket tracker over fossil, with a mutable body.
   tkt init [--adopt]                    create or migrate the tracker
   tkt new title=... [field=value...]    file a ticket, stdin is the description
   tkt show <id>                         one ticket as markdown
-  tkt list [status=...] [tag=...]       markdown table, Open and WIP by default
+  tkt list [status=...] [tag=...] [parent=...]  markdown table, Open and WIP by default
   tkt search <text>                     substring across titles, descriptions, comments
   tkt todo [N] [--triage] [-f FMT]      the N newest open tickets, 10 by default; FMT is txt, md, or json
   tkt triage [N] [-f FMT]               todo, only the top severity present
@@ -48,6 +48,7 @@ tkt: a ticket tracker over fossil, with a mutable body.
   tkt comment <id>                      add a comment from stdin or $EDITOR
   tkt tag <id> <tag...>|--clear         replace the tag set
   tkt block <id> <id...>|--clear        replace what the ticket waits on
+  tkt parent <id> <id>|--clear          make the ticket a subtask of another, one level deep
   tkt set <id> <field> [value...]       write one field, value from args or stdin
   tkt close <id> [resolution=...]       close, stdin is the closing comment
   tkt clean [--force]                   purge closed tickets, asking first unless forced
@@ -60,7 +61,7 @@ tkt: a ticket tracker over fossil, with a mutable body.
   tkt run <fossil args...>              any fossil command against the tracker
   tkt help | version
 
-Fields for new: title type status severity priority subsystem tags foundin.
+Fields for new: title type status severity priority subsystem tags foundin parent.
 Ids are uuid prefixes.  The tracker is $TKT_DB, else the nearest .tkt.fossil here or
 above; init creates one at the git root, or here outside git.
 EOF
@@ -172,6 +173,7 @@ CREATE TABLE ticket(
   title TEXT,
   tags TEXT,
   blockers TEXT,
+  parent TEXT,
   description TEXT,
   comment TEXT
 );
@@ -252,27 +254,56 @@ view() {
 <th1>
 html "<h2>[htmlize $title]</h2>\n"
 </th1>
-<table class="label-value">
-<tr><td class="tktDspLabel">Ticket:</td><td class="tktDspValue">$<tkt_uuid></td></tr>
-<tr><td class="tktDspLabel">State:</td><td class="tktDspValue">$<status> &middot; $<type> &middot; $<severity></td></tr>
-<tr><td class="tktDspLabel">Subsystem:</td><td class="tktDspValue">$<subsystem></td></tr>
-<tr><td class="tktDspLabel">Tags:</td><td class="tktDspValue"><th1>
-for {set i 0} {$i < [llength $tags]} {set i [expr {$i+1}]} {
-  set t [lindex $tags $i]
-  html "<a href=\"$home/rptview?title=By+Tag#tag=[httpize $t]\">[htmlize $t]</a> "
-}
-</th1></td></tr>
-<tr><td class="tktDspLabel">Blocked by:</td><td class="tktDspValue"><th1>
-for {set i 0} {$i < [llength $blockers]} {set i [expr {$i+1}]} {
-  set b [lindex $blockers $i]
-  query {SELECT substr(tkt_uuid,1,10) AS bid, title AS btitle FROM ticket WHERE tkt_uuid LIKE $b || '%'} {
-    html "<a href=\"$home/tktview/$bid\">$bid</a> [htmlize $btitle]<br>\n"
+<th1>
+# each row shows only when it has a value, so a sparse ticket stays short
+proc row {label value} {
+  if {[string length [string trim $value]] > 0} {
+    html "<tr><td class=\"tktDspLabel\">$label:</td><td class=\"tktDspValue\">$value</td></tr>\n"
   }
 }
-</th1></td></tr>
-<tr><td class="tktDspLabel">Found in:</td><td class="tktDspValue">$<foundin></td></tr>
-<tr><td class="tktDspLabel">Resolution:</td><td class="tktDspValue">$<resolution></td></tr>
-</table>
+proc field {name} {
+  upvar 1 $name v
+  if {[info exists v]} { return [string trim $v] }
+  return ""
+}
+html "<table class=\"label-value\">\n"
+row Ticket [htmlize $tkt_uuid]
+set v ""
+foreach f {status type severity} {
+  set x [field $f]
+  if {[string length $x] > 0} {
+    if {[string length $v] > 0} { set v "$v &middot; " }
+    set v "$v[htmlize $x]"
+  }
+}
+row State $v
+row Subsystem [htmlize [field subsystem]]
+set v ""
+foreach t [field tags] {
+  set v "$v<a href=\"$home/rptview?title=By+Tag#tag=[httpize $t]\">[htmlize $t]</a> "
+}
+row Tags $v
+set v ""
+foreach b [field blockers] {
+  query {SELECT substr(tkt_uuid,1,10) AS bid, title AS btitle FROM ticket WHERE tkt_uuid LIKE $b || '%'} {
+    set v "$v<a href=\"$home/tktview/$bid\">$bid</a> [htmlize $btitle]<br>\n"
+  }
+}
+row "Blocked by" $v
+set v ""
+query {SELECT substr(p.tkt_uuid,1,10) AS pid, p.title AS ptitle FROM ticket t JOIN ticket p ON substr(p.tkt_uuid,1,10)=trim(t.parent) WHERE t.tkt_id=$tkt_id} {
+  set v "<a href=\"$home/tktview/$pid\">$pid</a> [htmlize $ptitle]"
+}
+row Parent $v
+set v ""
+query {SELECT substr(c.tkt_uuid,1,10) AS cid, c.status AS cstatus, c.title AS ctitle FROM ticket t JOIN ticket c ON trim(c.parent)=substr(t.tkt_uuid,1,10) WHERE t.tkt_id=$tkt_id ORDER BY c.tkt_ctime} {
+  set v "$v<a href=\"$home/tktview/$cid\">$cid</a> [htmlize $cstatus] &middot; [htmlize $ctitle]<br>\n"
+}
+row Subtasks $v
+row "Found in" [htmlize [field foundin]]
+if {[field status] eq "Closed"} { row Resolution [htmlize [field resolution]] }
+html "</table>\n"
+</th1>
 <th1>
 html "<p class=\"tktActions\">"
 if {$status eq "Closed"} {
@@ -768,10 +799,12 @@ INSERT INTO r VALUES('Blocked', '#ffffff Key:
   datetime(tkt_mtime) AS ''mtime'',
   status, severity,
   (SELECT group_concat(substr(b.tkt_uuid,1,10) || '' '' || coalesce(b.title,''''), char(10)) FROM ticket b
-    WHERE '' '' || t.blockers || '' '' LIKE ''% '' || substr(b.tkt_uuid,1,10) || '' %'') AS ''blocked by'',
+    WHERE '' '' || coalesce(t.blockers,'''') || '' '' LIKE ''% '' || substr(b.tkt_uuid,1,10) || '' %''
+       OR (trim(coalesce(b.parent,'''')) = substr(t.tkt_uuid,1,10) AND b.status IN (''Open'',''WIP''))) AS ''blocked by'',
   title
 FROM ticket t
-WHERE status IN (''Open'',''WIP'') AND trim(coalesce(blockers,'''')) <> ''''
+WHERE status IN (''Open'',''WIP'') AND (trim(coalesce(blockers,'''')) <> ''''
+  OR EXISTS (SELECT 1 FROM ticket c WHERE trim(coalesce(c.parent,'''')) = substr(t.tkt_uuid,1,10) AND c.status IN (''Open'',''WIP'')))
 ORDER BY tkt_mtime DESC');
 INSERT INTO r VALUES('Recently Closed', '#ffffff Key:
 #c8c8c8 Closed', 'SELECT
@@ -837,9 +870,10 @@ verb_init() {
 
 verb_new() {
   need
-  kv 'title type status severity priority subsystem tags foundin' "$@"
+  kv 'title type status severity priority subsystem tags foundin parent' "$@"
   [ -n "$kv_title" ] || die 'title is required'
-  local body foundin
+  local body foundin parent=
+  if [ -n "$kv_parent" ]; then parent=$(resolve "$kv_parent"); fit_parent '' "$parent"; fi
   body=$(slurp)
   foundin=${kv_foundin:-$(git rev-parse -q --verify HEAD 2>/dev/null || true)}
   safe "$kv_title" "$kv_type" "$kv_status" "$kv_severity" "$kv_priority" "$kv_subsystem" "$kv_tags" "$foundin" "$body"
@@ -851,6 +885,7 @@ verb_new() {
     priority "${kv_priority:-Medium}" \
     subsystem "$kv_subsystem" \
     tags "$kv_tags" \
+    parent "$parent" \
     foundin "$foundin" \
     mimetype text/x-markdown \
     description "$body"
@@ -913,6 +948,33 @@ verb_block() {
   fx ticket set "$id" blockers "$ids"
 }
 
+# subtasks are one level deep: a parent has no parent, and a ticket with subtasks takes none
+fit_parent() {
+  local child=$1 parent=$2
+  [ "$child" != "$parent" ] || die 'a ticket cannot be its own parent'
+  [ "$(sqlq "select count(*) from ticket where tkt_uuid like '$parent%' and trim(coalesce(parent,'')) <> '';")" = 0 ] \
+    || die "$parent is itself a subtask, and subtasks are one level deep"
+  [ -z "$child" ] || [ "$(sqlq "select count(*) from ticket where trim(coalesce(parent,'')) = '$child';")" = 0 ] \
+    || die "$child has subtasks of its own, and subtasks are one level deep"
+}
+
+verb_parent() {
+  need
+  local id parent
+  id=$(resolve "$1")
+  shift
+  if [ "$1" = --clear ]; then
+    parent=' '
+  else
+    [ $# -gt 0 ] || set -- $(slurp)
+    [ $# -gt 0 ] || die 'no parent given; use --clear to remove it'
+    [ $# -eq 1 ] || die 'a ticket has one parent'
+    parent=$(resolve "$1")
+    fit_parent "$id" "$parent"
+  fi
+  fx ticket set "$id" parent "$parent"
+}
+
 verb_set() {
   need
   local id field value have
@@ -925,6 +987,7 @@ verb_set() {
     description) die 'use: tkt edit' ;;
     tags) die 'use: tkt tag' ;;
     blockers) die 'use: tkt block' ;;
+    parent) die 'use: tkt parent' ;;
   esac
   have=" $(sqlq "select group_concat(name,' ') from pragma_table_info('ticket');") "
   case "$have" in *" $field "*) ;; *) die "unknown field: $field" ;; esac
@@ -944,6 +1007,9 @@ verb_close() {
   safe "$kv_resolution" "$body"
   fx ticket set "$id" status Closed resolution "${kv_resolution:-Fixed}"
   [ -z "$body" ] || fx ticket set "$id" +icomment "$body" mimetype text/x-markdown
+  local open
+  open=$(sqlq "select count(*) from ticket where trim(coalesce(parent,'')) = '$id' and status in ('Open','WIP');")
+  [ "${open:-0}" = 0 ] || note "closed with $open open subtask(s); see: tkt show $id"
 }
 
 # purged artifacts go to fossil's graveyard, so a clean can be reverted with: tkt run purge undo <id>
@@ -976,6 +1042,8 @@ verb_show() {
   local xs="'- ' || substr(s.tkt_uuid,1,10) || ' | ' || coalesce(nullif(s.status,''),'-') || ' | ' || coalesce(nullif(s.title,''),'(untitled)')"
   sqlq \
     "select '# ' || coalesce(nullif(title,''),'(untitled)') || char(10) || char(10) || $COLS || char(10) || char(10) || coalesce(nullif(trim(description),''),'(no description)') || coalesce((select group_concat(char(10) || char(10) || '---' || char(10) || char(10) || c.icomment, '') from ticketchng c where c.tkt_id=ticket.tkt_id and coalesce(c.icomment,'')!=''),'') from ticket where tkt_uuid like '$id%';" \
+    "select char(10) || '## Parent' || char(10) || char(10) || $xb from ticket t join ticket b on substr(b.tkt_uuid,1,10) = trim(t.parent) where t.tkt_uuid like '$id%';" \
+    "select char(10) || '## Subtasks' || char(10) || char(10) || group_concat($xb, char(10)) from (select b.* from ticket t join ticket b on trim(b.parent) = substr(t.tkt_uuid,1,10) where t.tkt_uuid like '$id%' order by b.tkt_ctime) b having count(*) > 0;" \
     "select char(10) || '## Blocked by' || char(10) || char(10) || group_concat($xb, char(10)) from ticket t join ticket b on ' ' || coalesce(t.blockers,'') || ' ' like '% ' || substr(b.tkt_uuid,1,10) || ' %' where t.tkt_uuid like '$id%' having count(b.tkt_id) > 0;" \
     "select char(10) || '## Blocks' || char(10) || char(10) || group_concat($xb, char(10)) from ticket t join ticket b on ' ' || coalesce(b.blockers,'') || ' ' like '% ' || substr(t.tkt_uuid,1,10) || ' %' where t.tkt_uuid like '$id%' having count(b.tkt_id) > 0;" \
     "select char(10) || '## Referenced by' || char(10) || char(10) || group_concat(row, char(10)) from (select distinct $xs as row from ticket t join backlink bl on t.tkt_uuid like bl.target || '%' join ticketchng c on c.tkt_rid=bl.srcid join ticket s on s.tkt_id=c.tkt_id and s.tkt_id != t.tkt_id where bl.srctype=1 and t.tkt_uuid like '$id%') having count(*) > 0;" \
@@ -984,7 +1052,7 @@ verb_show() {
 
 verb_list() {
   need
-  kv 'status tag' "$@"
+  kv 'status tag parent' "$@"
   local want=${kv_status:-Open} filter
   case "$want" in
     all) filter='where 1=1' ;;
@@ -992,6 +1060,7 @@ verb_list() {
     *) filter="where status=$(lit "$want")" ;;
   esac
   [ -z "$kv_tag" ] || filter="$filter and ' '||coalesce(tags,'')||' ' like $(lit "% $kv_tag %")"
+  [ -z "$kv_parent" ] || filter="$filter and trim(coalesce(parent,'')) = '$(resolve "$kv_parent")'"
   sqlq "select $COLS from ticket $filter order by tkt_mtime desc;" | paint
 }
 
@@ -1152,9 +1221,10 @@ ticket: one row per ticket, holding each field's current value
   status       Open, WIP, or Closed
   tags         space-separated words
   blockers     space-separated ten-character ids of the tickets this one waits on
+  parent       the ten-character id this ticket is a subtask of; one level deep
   description  the current problem statement, in markdown
   tkt_ctime, tkt_mtime   julian day numbers; datetime(tkt_mtime) gives a timestamp
-  An emptied tags or blockers field holds a single space, so test trim(tags) = ''.
+  An emptied tags, blockers or parent field holds a single space, so test trim(tags) = ''.
 
 ticketchng: one row per change to a ticket
   tkt_id       joins ticket.tkt_id
@@ -1166,11 +1236,12 @@ backlink: references written as [](<uuid>) in ticket text
   srcid        joins ticketchng.tkt_rid, the change whose text holds the reference
   srctype      1 for ticket text
 
-Open tickets whose blockers are all closed:
+Open tickets whose blockers and subtasks are all closed:
   select substr(t.tkt_uuid,1,10) as id, t.title from ticket t
    where t.status in ('Open','WIP') and not exists (
      select 1 from ticket b
-      where ' ' || coalesce(t.blockers,'') || ' ' like '% ' || substr(b.tkt_uuid,1,10) || ' %'
+      where (' ' || coalesce(t.blockers,'') || ' ' like '% ' || substr(b.tkt_uuid,1,10) || ' %'
+             or trim(coalesce(b.parent,'')) = substr(t.tkt_uuid,1,10))
         and b.status != 'Closed');
 
 Open tickets untouched for 30 days:
@@ -1265,11 +1336,13 @@ cat /tmp/ticket-body.md | tkt new title='foo explodes'
 | Add to the record | `tkt comment <id> <<'EOF'` ... |
 | Replace tags | `tkt tag <id> compiler oop`, or `--clear` |
 | Declare what it waits on | `tkt block <id> <other-id>...`, or `--clear` |
+| Make it a subtask | `tkt parent <id> <parent-id>`, or `--clear`; one level deep |
+| List a ticket's subtasks | `tkt list parent=<id>` |
 | Change one field | `tkt set <id> severity Critical` |
 | Close | `tkt close <id> <<'EOF'` ... |
 
 Optional fields for `new`: `type`, `status`, `severity`, `priority`, `subsystem`, `tags`,
-`foundin`. An unknown field name fails, so fix the spelling and rerun.
+`foundin`, `parent`. An unknown field name fails, so fix the spelling and rerun.
 
 Never use `tkt run` for a write that a verb covers, and never edit `.tkt.fossil` directly.
 `tkt run` is the human's escape hatch.
@@ -1362,7 +1435,7 @@ Each tracker has one server: a new `tkt serve`, from any terminal, stops the old
   unless asked. `TKT_PORT` in the environment beats `.env`, and `port=` beats both.
 - **Stop:** `tkt stop` works from anywhere.
 - **What the human can do there:** file, edit, comment on, close, and reopen tickets.
-  Blockers are command-line only.
+  Blockers and parents are command-line only.
 
 ## Reporting
 
@@ -1398,7 +1471,7 @@ main() {
     help|-h|--help) usage; return ;;
     version|--version) printf 'tkt %s\n' "$TKT_VERSION"; return ;;
     skill) verb_skill "$@"; return ;;
-    init|new|show|list|search|todo|triage|edit|comment|tag|block|set|close|clean|serve|stop|status|sql|run) ;;
+    init|new|show|list|search|todo|triage|edit|comment|tag|block|parent|set|close|clean|serve|stop|status|sql|run) ;;
     *) usage >&2; die "unknown verb: $verb" ;;
   esac
   locate

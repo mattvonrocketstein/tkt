@@ -127,7 +127,7 @@ def config(db, name):
 class TestSurface:
     def test_help_lists_every_verb(self):
         out = run("help").stdout
-        for verb in "init new show list search todo triage edit comment tag block set close serve stop status sql skill run".split():
+        for verb in "init new show list search todo triage edit comment tag block parent set close serve stop status sql skill run".split():
             assert f"tkt {verb}" in out
 
     def test_unknown_verb_fails(self):
@@ -201,6 +201,16 @@ class TestInit:
         tkt.fails("list", match="predates the blockers field")
         tkt.ok("init")
         tkt.ok("list")
+
+    def test_tracker_without_parent_migrates(self, tkt):
+        a = tkt.new("kept", tags="old")
+        tkt.sql("update config set value=replace(value,'parent TEXT,','') where name='ticket-table';")
+        tkt.ok("run", "rebuild")
+        tkt.fails("list", match="predates the parent field")
+        tkt.ok("init")
+        p = tkt.new("epic")
+        tkt.ok("parent", a, p)
+        assert "| old |" in tkt.show(a) and "## Parent" in tkt.show(a)
 
     def test_tracker_without_version_row_is_accepted(self, tkt):
         tkt.sql("delete from config where name='tkt-version';")
@@ -532,6 +542,77 @@ class TestBlockers:
         assert "## Blocks" not in tkt.show(b)
 
 
+class TestParent:
+    def test_both_directions(self, tkt):
+        p = tkt.new("epic")
+        a = tkt.new("first")
+        b = tkt.new("second")
+        tkt.ok("parent", a, p[:6])
+        tkt.ok("parent", b, p)
+        assert re.search(rf"## Parent\n\n- {p} \| Open \| epic", tkt.show(a))
+        assert re.search(rf"## Subtasks\n\n- {a} \| Open \| first\n- {b} \| Open \| second", tkt.show(p))
+
+    def test_new_with_parent(self, tkt):
+        p = tkt.new("epic")
+        a = tkt.new("child", parent=p[:6])
+        assert "## Parent" in tkt.show(a)
+
+    def test_list_filters_by_parent(self, tkt):
+        p = tkt.new("epic")
+        a = tkt.new("child", parent=p)
+        other = tkt.new("unrelated")
+        out = tkt.ok("list", f"parent={p[:6]}")
+        assert a in out and other not in out and p not in out
+
+    def test_self_parent_fails(self, tkt):
+        a = tkt.new("self")
+        tkt.fails("parent", a, a, match="its own parent")
+
+    def test_one_level_deep(self, tkt):
+        p = tkt.new("epic")
+        a = tkt.new("child", parent=p)
+        b = tkt.new("grandchild")
+        tkt.fails("parent", b, a, match="is itself a subtask")
+        tkt.fails("new", "title=nested", f"parent={a}", match="is itself a subtask")
+        tkt.fails("parent", p, b, match="has subtasks of its own")
+
+    def test_one_parent_only(self, tkt):
+        p = tkt.new("epic")
+        q = tkt.new("other")
+        a = tkt.new("child")
+        tkt.fails("parent", a, p, q, match="one parent")
+        tkt.fails("parent", a, match="use --clear")
+
+    def test_unknown_id_fails(self, tkt):
+        a = tkt.new("child")
+        tkt.fails("parent", a, "ffffffff", match="matches no single ticket")
+
+    def test_reparent_and_clear(self, tkt):
+        p = tkt.new("epic")
+        q = tkt.new("other")
+        a = tkt.new("child", parent=p)
+        tkt.ok("parent", a, q)
+        assert "## Subtasks" not in tkt.show(p)
+        assert "## Subtasks" in tkt.show(q)
+        tkt.ok("parent", a, "--clear")
+        assert "## Parent" not in tkt.show(a)
+        assert "## Subtasks" not in tkt.show(q)
+
+    def test_open_subtasks_block_the_parent(self, tkt):
+        p = tkt.new("epic")
+        a = tkt.new("child", parent=p)
+        report = tkt.sql("select sqlcode from reportfmt where title='Blocked';")
+        assert p in tkt.sql(report) and a in tkt.sql(report)
+        tkt.ok("close", a)
+        assert p not in tkt.sql(report)
+
+    def test_close_warns_of_open_subtasks(self, tkt):
+        p = tkt.new("epic")
+        tkt.new("child", parent=p)
+        r = run("close", p, db=tkt.db)
+        assert r.returncode == 0 and "1 open subtask" in r.stderr
+
+
 class TestSet:
     def test_field(self, tkt):
         a = tkt.new("severe")
@@ -544,7 +625,7 @@ class TestSet:
 
     def test_guarded_fields_name_their_verb(self, tkt):
         a = tkt.new("guarded")
-        cases = {"comment": "comment", "icomment": "comment", "description": "edit", "tags": "tag", "blockers": "block"}
+        cases = {"comment": "comment", "icomment": "comment", "description": "edit", "tags": "tag", "blockers": "block", "parent": "parent"}
         for field, verb in cases.items():
             tkt.fails("set", a, field, "x", match=f"use: tkt {verb}")
 

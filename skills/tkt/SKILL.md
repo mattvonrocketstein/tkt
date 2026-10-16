@@ -59,11 +59,13 @@ cat /tmp/ticket-body.md | tkt new title='foo explodes'
 | Add to the record | `tkt comment <id> <<'EOF'` ... |
 | Replace tags | `tkt tag <id> compiler oop`, or `--clear` |
 | Declare what it waits on | `tkt block <id> <other-id>...`, or `--clear` |
+| Make it a subtask | `tkt parent <id> <parent-id>`, or `--clear`; one level deep |
+| List a ticket's subtasks | `tkt list parent=<id>` |
 | Change one field | `tkt set <id> severity Critical` |
 | Close | `tkt close <id> <<'EOF'` ... |
 
 Optional fields for `new`: `type`, `status`, `severity`, `priority`, `subsystem`, `tags`,
-`foundin`. An unknown field name fails, so fix the spelling and rerun.
+`foundin`, `parent`. An unknown field name fails, so fix the spelling and rerun.
 
 Never use `tkt run` for a write that a verb covers, and never edit `.tkt.fossil` directly.
 `tkt run` is the human's escape hatch.
@@ -156,7 +158,7 @@ Each tracker has one server: a new `tkt serve`, from any terminal, stops the old
   unless asked. `TKT_PORT` in the environment beats `.env`, and `port=` beats both.
 - **Stop:** `tkt stop` works from anywhere.
 - **What the human can do there:** file, edit, comment on, close, and reopen tickets.
-  Blockers are command-line only.
+  Blockers and parents are command-line only.
 
 ## Reporting
 
