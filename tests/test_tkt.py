@@ -241,23 +241,24 @@ class TestInit:
         assert config(tkt.db, "index-page") == "/ticket"
         assert config(tkt.db, "default-skin") == ""
         menu = config(tkt.db, "mainmenu")
-        for entry in ("Tickets /ticket", "Admin /setup"):
+        for entry in ("Reports /ticket", "{Recent Activity} /rptview?title=Recent+Activity"):
             assert entry in menu
         assert "skin=" not in menu
         assert "builtin/skins/blitz/css.txt?mimetype=text/css" in config(tkt.db, "header")
         assert 'id="tkt-theme"' in config(tkt.db, "header")
         assert "html[data-theme=dark]" in config(tkt.db, "css")
         css = config(tkt.db, "css")
-        assert 'html[data-theme=dark] .report tr[style*="#f2dcdc"]' in css and "a.tkt-facet" in css
-        assert "function facets()" in config(tkt.db, "header") and "function zoomSlider()" in config(tkt.db, "header")
-        assert "div.container { max-width: none; width: 84%; }" in css and ".submenu .tkt-zoom" in css
-        assert tkt.sql("select count(*) from reportfmt where owner='tkt' and sqlcode like '%subsystem%';") == "5"
+        assert "a.tkt-facet" in css and "#f2dcdc" not in css
+        assert tkt.sql("select count(*) from reportfmt where owner='tkt' and (sqlcode like '%bgcolor%' or cols <> '');") == "0"
+        assert "function facets()" in config(tkt.db, "header") and "function zoomButtons()" in config(tkt.db, "header")
+        assert "div.container { max-width: none; width: 84%; }" in css and "header .container { display: flex;" in css
+        assert tkt.sql("select count(*) from reportfmt where owner='tkt' and sqlcode like '%subsystem%';") == "6"
         common = config(tkt.db, "ticket-common")
         assert "set subsystem_choices {\n  automation\n  tests\n  docs\n  cli\n  devx\n  ux\n  ui\n}" in common
         assert "Code_Defect" in common
         assert config(tkt.db, "footer") and config(tkt.db, "details")
         titles = tkt.sql("select title from reportfmt order by title;").split("\n")
-        for t in ("All Tickets", "Open Tickets", "Critical and Severe", "Recent Activity", "By Tag", "Blocked", "Recently Closed"):
+        for t in ("All Tickets", "Open Tickets", "Critical and Severe", "Recent Activity", "By Tag", "Blocked", "Recently Closed", "Tagged Tickets"):
             assert t in titles
         assert 'name="description"' in config(tkt.db, "ticket-newpage")
         edit = config(tkt.db, "ticket-editpage")
@@ -318,7 +319,8 @@ class TestGithubLinks:
         git(tkt.cwd, "remote", "add", "origin", remote)
         tkt.ok("init")
         header = config(tkt.db, "header")
-        assert header.index('id="tkt-theme"') < header.index('class="tkt-github"')
+        # floated right, so markup order is reversed on screen: github sits beside the sitemap, right of the theme toggle
+        assert header.index('class="tkt-github"') < header.index('id="tkt-theme"')
         for href in ("https://github.com/o/r", "https://github.com/o/r/actions", "https://github.com/o/r/issues", "https://github.com/o/r/tree/main"):
             assert f'href="{href}"' in header
         drop = header[header.index('id="tkt-ghdrop"'):]
@@ -582,6 +584,21 @@ class TestParent:
         a = tkt.new("child")
         tkt.fails("parent", a, p, q, match="one parent")
         tkt.fails("parent", a, match="use --clear")
+
+    def test_parent_cannot_block_its_subtask(self, tkt):
+        p = tkt.new("epic")
+        a = tkt.new("child", parent=p)
+        tkt.fails("block", a, p, match="cannot block its subtask")
+        b = tkt.new("waits")
+        tkt.ok("block", b, p)
+        tkt.fails("parent", b, p, match="cannot block its subtask")
+        assert "## Parent" not in tkt.show(b)
+
+    def test_subtask_may_also_be_an_explicit_blocker(self, tkt):
+        p = tkt.new("epic")
+        a = tkt.new("child", parent=p)
+        tkt.ok("block", p, a)
+        assert "## Blocked by" in tkt.show(p)
 
     def test_unknown_id_fails(self, tkt):
         a = tkt.new("child")

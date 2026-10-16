@@ -6,7 +6,7 @@ set -eo pipefail
 TKT_VERSION=0.1.0
 FIELDS='tags blockers parent description'
 GUEST=hjr
-MENU="Tickets /ticket r {} Admin /setup {a s} desktoponly Logout /logout L desktoponly Login /login !L desktoponly"
+MENU="{Recent Activity} /rptview?title=Recent+Activity r {} Reports /ticket r {} Login /login !L desktoponly"
 COLS="substr(tkt_uuid,1,10) || ' | ' || coalesce(nullif(status,''),'-') || ' | ' || coalesce(nullif(severity,''),'-') || ' | ' || coalesce(nullif(trim(tags),''),'-') || ' | ' || coalesce(nullif(title,''),'(untitled)')"
 
 # color only on a terminal, and never when either no-color variable is set or the terminal is dumb
@@ -266,7 +266,57 @@ proc field {name} {
   if {[info exists v]} { return [string trim $v] }
   return ""
 }
-html "<table class=\"label-value\">\n"
+# tabler icons, floated right above the fields: copy the id, and for a subtask, up to its parent and along its siblings
+set svg {<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"}
+set clip {<path d="M9 5h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-12a2 2 0 0 0 -2 -2h-2"/><path d="M9 3m0 2a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2z"/>}
+# a card's label row, with collapse and copy controls floated right; the copy takes the markdown source, kept hidden in the card,
+# or with no source, the card's text as shown
+proc card_head {label src} {
+  upvar #0 svg svg clip clip
+  html "<div class=\"tkt-card-label\">$label<span class=\"tkt-card-ctl\">"
+  html "<a href=\"#\" class=\"tkt-fold\" aria-label=\"Collapse\">$svg class=\"tkt-fold-up\"><path d=\"M6 15l6 -6l6 6\"/></svg>$svg class=\"tkt-fold-down\"><path d=\"M6 9l6 6l6 -6\"/></svg></a>"
+  html "<a href=\"#\" class=\"tkt-copy\" aria-label=\"Copy contents\">$svg class=\"tkt-clip\">$clip</svg>$svg class=\"tkt-clipped\">$clip<path d=\"M9 14l2 2l4 -4\"/></svg></a>"
+  html "</span></div>\n"
+  if {[string length $src] > 0} { html "<pre hidden class=\"tkt-card-src\">[htmlize $src]</pre>\n" }
+}
+set tid [string range $tkt_uuid 0 9]
+html "<div class=\"tkt-nav\">"
+set pid ""
+query {SELECT substr(p.tkt_uuid,1,10) AS pid FROM ticket t JOIN ticket p ON substr(p.tkt_uuid,1,10)=trim(t.parent) WHERE t.tkt_id=$tkt_id} {}
+if {[string length $pid] > 0} {
+  set prev ""
+  set next ""
+  query {SELECT substr(s.tkt_uuid,1,10) AS prev FROM ticket t JOIN ticket s ON trim(s.parent)=trim(t.parent) WHERE t.tkt_id=$tkt_id AND (s.tkt_ctime < t.tkt_ctime OR (s.tkt_ctime = t.tkt_ctime AND s.tkt_id < t.tkt_id)) ORDER BY s.tkt_ctime DESC, s.tkt_id DESC LIMIT 1} {}
+  query {SELECT substr(s.tkt_uuid,1,10) AS next FROM ticket t JOIN ticket s ON trim(s.parent)=trim(t.parent) WHERE t.tkt_id=$tkt_id AND (s.tkt_ctime > t.tkt_ctime OR (s.tkt_ctime = t.tkt_ctime AND s.tkt_id > t.tkt_id)) ORDER BY s.tkt_ctime, s.tkt_id LIMIT 1} {}
+  set left "$svg><path d=\"M11 17h6l-4 -5l4 -5h-6l-4 5z\"/></svg>"
+  set right "$svg><path d=\"M13 7h-6l4 5l-4 5h6l4 -5z\"/></svg>"
+  if {[string length $prev] > 0} {
+    html "<a href=\"$home/tktview/$prev\" aria-label=\"Prev in Series\">$left</a>"
+  } else {
+    html "<span class=\"tkt-off\" aria-label=\"First in Series\">$left</span>"
+  }
+  if {[string length $next] > 0} {
+    html "<a href=\"$home/tktview/$next\" aria-label=\"Next in Series\">$right</a>"
+  } else {
+    html "<span class=\"tkt-off\" aria-label=\"Last in Series\">$right</span>"
+  }
+  html "<a href=\"$home/tktview/$pid\" aria-label=\"Up to parent\">$svg><path d=\"M17 11v6l-5 -4l-5 4v-6l5 -4z\"/></svg></a>"
+}
+set tg [string trim [field tags]]
+if {[string length $tg] > 0} {
+  html "<a href=\"$home/rptview?title=Tagged+Tickets#tags=[httpize $tg]\" aria-label=\"Similar tickets\">$svg><path d=\"M3 8v4.172a2 2 0 0 0 .586 1.414l5.71 5.71a2.41 2.41 0 0 0 3.408 0l3.592 -3.592a2.41 2.41 0 0 0 0 -3.408l-5.71 -5.71a2 2 0 0 0 -1.414 -.586h-4.172a2 2 0 0 0 -2 2z\"/><path d=\"M18 19l1.592 -1.592a4.82 4.82 0 0 0 0 -6.816l-4.592 -4.592\"/><path d=\"M7 10h-.01\"/></svg></a>"
+}
+# attach and history act on this ticket, so they sit here rather than in fossil's submenu
+if {[anycap b]} {
+  html "<a href=\"$home/attachadd?tkt=$tid&amp;from=[httpize /tktview/$tid]\" aria-label=\"Attach\">$svg><path d=\"M15 7l-6.5 6.5a1.5 1.5 0 0 0 3 3l6.5 -6.5a3 3 0 0 0 -6 -6l-6.5 6.5a4.5 4.5 0 0 0 9 9l6.5 -6.5\"/></svg></a>"
+}
+html "<a href=\"$home/tkthistory/$tid\" aria-label=\"History\">$svg><path d=\"M12 8l0 4l2 2\"/><path d=\"M3.05 11a9 9 0 1 1 .5 4m-.5 5v-5h5\"/></svg></a>"
+html "<a href=\"#\" id=\"tkt-copy\" class=\"tkt-copy\" data-id=\"$tid\" aria-label=\"copy ticket id\">"
+html "$svg class=\"tkt-clip\">$clip</svg>$svg class=\"tkt-clipped\">$clip<path d=\"M9 14l2 2l4 -4\"/></svg></a>"
+html "</div>\n"
+html "<div class=\"tkt-card tkt-card-fields\">"
+card_head Details ""
+html "<div class=\"tkt-card-body\"><table class=\"label-value\">\n"
 row Ticket [htmlize $tkt_uuid]
 set v ""
 foreach f {status type severity} {
@@ -302,32 +352,35 @@ query {SELECT substr(c.tkt_uuid,1,10) AS cid, c.status AS cstatus, c.title AS ct
 row Subtasks $v
 row "Found in" [htmlize [field foundin]]
 if {[field status] eq "Closed"} { row Resolution [htmlize [field resolution]] }
-html "</table>\n"
-</th1>
-<th1>
-html "<p class=\"tktActions\">"
+html "</table></div>\n"
+# the actions sit in the card's footer, outside its body, so they stay out of a copy; collapsing hides them with the body
+html "<p class=\"tktActions tkt-card-foot\">"
 if {$status eq "Closed"} {
   html "<a class=\"button\" href=\"$home/tktedit/$tkt_uuid?status=Open&amp;resolution=Open\">Reopen</a>"
 } else {
   html "<a class=\"button\" href=\"$home/tktedit/$tkt_uuid?status=Closed&amp;resolution=Fixed\">Close</a>"
 }
-html " <a class=\"button\" href=\"$home/tktedit/$tkt_uuid\">Edit or comment</a></p>\n"
+html " <a class=\"button\" href=\"$home/tktedit/$tkt_uuid\">Edit or comment</a></p></div>\n"
 if {[info exists description] && [string length $description] > 0} {
-  html "<div class=\"section\">Description</div>\n"
-  html "<div class=\"tktDspValue\">\n"
+  html "<div class=\"tkt-card\">"
+  card_head Description $description
+  html "<div class=\"tkt-card-body\">\n"
   # th1 markdown returns {title body} and strips a leading heading into the title; the comment keeps it in the body
   html [lindex [markdown "<!-- -->\n\n$description"] 1]
-  html "</div>\n"
+  html "</div></div>\n"
 }
 query {SELECT datetime(tkt_mtime) AS xdate, coalesce(login,'') AS xwho,
               coalesce(icomment,'') AS xcmt
          FROM ticketchng
         WHERE tkt_id=$tkt_id AND length(coalesce(icomment,'')) > 0
         ORDER BY tkt_mtime} {
-  html "<div class=\"section\">Comment by $xwho on $xdate</div>\n"
-  html "<div class=\"tktDspValue\">\n"
+  set xmeta $xdate
+  if {[string length $xwho] > 0} { set xmeta "[htmlize $xwho] &middot; $xdate" }
+  html "<div class=\"tkt-card\">"
+  card_head "Comment <span class=\"tkt-card-meta\">$xmeta</span>" $xcmt
+  html "<div class=\"tkt-card-body\">\n"
   html [lindex [markdown "<!-- -->\n\n$xcmt"] 1]
-  html "</div>\n"
+  html "</div></div>\n"
 }
 </th1>
 EOF
@@ -480,6 +533,23 @@ $prism<script nonce="\$nonce">
     h.setAttribute('data-theme',t);
     try { localStorage.setItem(k,t); } catch(e){}
   });
+  // copy icons: the ticket id from data-id, or a card's markdown source; the icon shows a check for a moment
+  document.addEventListener('click',function(e){
+    var a=e.target.closest&&e.target.closest('a.tkt-copy'); if(!a) return;
+    e.preventDefault();
+    var card=a.closest('.tkt-card'), src=card&&card.querySelector('.tkt-card-src');
+    var text=a.getAttribute('data-id')||(src?src.textContent:card?card.querySelector('.tkt-card-body').innerText.trim():''), tip=a._tip||(a._tip=a.getAttribute('aria-label'));
+    function done(){ a.classList.add('tkt-copied'); a.setAttribute('aria-label','Copied'); clearTimeout(a._t); a._t=setTimeout(function(){ a.classList.remove('tkt-copied'); a.setAttribute('aria-label',tip); },1500); }
+    function fallback(){ var x=document.createElement('textarea'); x.value=text; x.style.position='fixed'; x.style.opacity='0'; document.body.appendChild(x); x.select(); try { if(document.execCommand('copy')) done(); } catch(e){} x.remove(); }
+    if(navigator.clipboard&&window.isSecureContext) navigator.clipboard.writeText(text).then(done,fallback); else fallback();
+  });
+  // a card's fold icon collapses it to its label row, and expands it again
+  document.addEventListener('click',function(e){
+    var a=e.target.closest&&e.target.closest('a.tkt-fold'); if(!a) return;
+    e.preventDefault();
+    var shut=a.closest('.tkt-card').classList.toggle('tkt-collapsed');
+    a.setAttribute('aria-label',shut?'Expand':'Collapse');
+  });
   // report tables: status, severity, subsystem, tags and the like become links that filter the rows in place.
   // the filter lives in the url hash, so a filtered view can be bookmarked or shared
   function facets(){
@@ -487,7 +557,7 @@ $prism<script nonce="\$nonce">
     var multi={tags:1,tag:1}, keys={status:1,severity:1,subsystem:1,type:1,priority:1,resolution:1,tags:1,tag:1};
     var heads=[].map.call(t.tHead.rows[0].cells,function(h){return h.textContent.trim().toLowerCase();});
     var rows=[].slice.call(t.tBodies[0].rows);
-    function parse(){ var f={}; location.hash.slice(1).split('&').forEach(function(p){ var i=p.indexOf('='); if(i>0) f[decodeURIComponent(p.slice(0,i))]=decodeURIComponent(p.slice(i+1)); }); return f; }
+    function parse(){ var f={}; location.hash.slice(1).split('&').forEach(function(p){ var i=p.indexOf('='); if(i>0) f[decodeURIComponent(p.slice(0,i))]=decodeURIComponent(p.slice(i+1).replace(/\+/g,' ')); }); return f; }
     // fossil pages carry a base href, so hash links must spell out the page path or they leave the page
     function href(f){ var q=[]; for(var k in f) q.push(encodeURIComponent(k)+'='+encodeURIComponent(f[k])); return location.pathname+location.search+'#'+q.join('&'); }
     function words(c,k){ var v=c.textContent.trim(); return multi[k]?v.split(/\s+/).filter(Boolean):(v?[v]:[]); }
@@ -517,13 +587,15 @@ $prism<script nonce="\$nonce">
     function apply(){
       var f=parse(), ks=Object.keys(f);
       rows.forEach(function(r){
-        var ok=ks.every(function(k){ var i=heads.indexOf(k); return i>=0&&r.cells[i]&&words(r.cells[i],k).indexOf(f[k])>=0; });
+        // a tags filter of several words, as the ticket view's similar-tickets link sends, matches any of them
+        var ok=ks.every(function(k){ var i=heads.indexOf(k); if(i<0||!r.cells[i]) return false; var ws=words(r.cells[i],k);
+          return (multi[k]?f[k].split(/\s+/):[f[k]]).some(function(v){ return ws.indexOf(v)>=0; }); });
         r.classList.toggle('tkt-hide',!ok);
       });
       bar.textContent=''; bar.style.display=ks.length?'':'none';
       if(!ks.length) return;
       var b=document.createElement('b'); b.textContent='Filter:'; bar.appendChild(b);
-      ks.forEach(function(k){ var g={}; for(var o in f) if(o!==k) g[o]=f[o]; var a=document.createElement('a'); a.href=href(g); a.textContent=k+' = '+f[k]+' \u00d7'; a.title='remove'; bar.appendChild(a); });
+      ks.forEach(function(k){ var g={}; for(var o in f) if(o!==k) g[o]=f[o]; var a=document.createElement('a'); a.href=href(g); a.textContent=k+(multi[k]&&/\s/.test(f[k].trim())?' any of ':' = ')+f[k]+' \u00d7'; a.title='remove'; bar.appendChild(a); });
       var x=document.createElement('a'); x.href=location.pathname+location.search+'#'; x.className='tkt-clear'; x.textContent='clear'; bar.appendChild(x);
       var n=rows.filter(function(r){return !r.classList.contains('tkt-hide');}).length;
       bar.appendChild(document.createTextNode(' '+n+' of '+rows.length));
@@ -539,16 +611,61 @@ $prism<script nonce="\$nonce">
     window.addEventListener('hashchange',apply);
     apply();
   }
-  function zoomSlider(){
+  // zoom out and zoom in, as menu icons just left of the theme toggle; 10% a step from 70% to 160%, double-click either for 100%
+  function zoomButtons(){
+    var th=document.querySelector('.mainmenu li.tkt-themeli'); if(!th) return;
+    var lens='<path d="M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"/><path d="M7 10l6 0"/><path d="M21 21l-6 -6"/>', bs=[];
+    function tips(){ bs.forEach(function(b){ b.a.setAttribute('aria-label',b.name+', now '+z+'%'); }); }
+    // each goes in right after the theme toggle, and floats stack right to left, so zoom out ends up leftmost
+    [['Zoom out',-10,''],['Zoom in',10,'<path d="M10 7l0 6"/>']].forEach(function(d){
+      var li=document.createElement('li'), a=document.createElement('a');
+      li.className='tkt-menuicon tkt-zoomli'; a.href='#';
+      a.innerHTML='<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+lens+d[2]+'</svg>';
+      a.addEventListener('click',function(e){ e.preventDefault(); zoom(Math.min(160,Math.max(70,z+d[1]))); tips(); });
+      a.addEventListener('dblclick',function(e){ e.preventDefault(); zoom(100); tips(); });
+      li.appendChild(a); th.parentNode.insertBefore(li,th.nextSibling); bs.push({a:a,name:d[0]});
+    });
+    tips();
+  }
+  // report pages: the table and its filter bar go into a card titled with the report name, with the ticket view's card controls.
+  // rows are uncolored, so a color key (fossil's own reports still have one) is dropped
+  var ICON='<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+  var CLIP='<path d="M9 5h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-12a2 2 0 0 0 -2 -2h-2"/><path d="M9 3m0 2a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2z"/>';
+  function reportCard(){
+    if(!/\/rptview/.test(location.pathname)) return;
+    var t=document.querySelector('table.report.sortable')||document.querySelector('table.report thead')&&document.querySelector('table.report thead').parentNode; if(!t) return;
+    var key=[].filter.call(document.querySelectorAll('table.report'),function(k){ return k!==t&&!k.tHead; })[0];
+    var bar=t.previousElementSibling&&t.previousElementSibling.classList.contains('tkt-filterbar')?t.previousElementSibling:null;
+    var card=document.createElement('div'), label=document.createElement('div'), body=document.createElement('div');
+    card.className='tkt-card tkt-card-report'; label.className='tkt-card-label'; body.className='tkt-card-body';
+    label.appendChild(document.createTextNode(document.title.replace(/^[^:]*:\s*/,'')));
+    if(key) key.remove();
+    [].forEach.call(t.querySelectorAll('tbody tr[style]'),function(r){ r.style.backgroundColor=''; });
+    var ctl=document.createElement('span'); ctl.className='tkt-card-ctl';
+    ctl.innerHTML='<a href="#" class="tkt-fold" aria-label="Collapse">'+ICON+' class="tkt-fold-up"><path d="M6 15l6 -6l6 6"/></svg>'+ICON+' class="tkt-fold-down"><path d="M6 9l6 6l6 -6"/></svg></a>'
+      +'<a href="#" class="tkt-copy" aria-label="Copy contents">'+ICON+' class="tkt-clip">'+CLIP+'</svg>'+ICON+' class="tkt-clipped">'+CLIP+'<path d="M9 14l2 2l4 -4"/></svg></a>';
+    label.insertBefore(ctl,label.firstChild);
+    t.parentNode.insertBefore(card,bar||t);
+    card.appendChild(label); card.appendChild(body);
+    if(bar) body.appendChild(bar);
+    body.appendChild(t);
+    // each row's trailing 'edit' link becomes the tabler edit icon
+    [].forEach.call(t.querySelectorAll('tbody a[href*="tktedit/"]'),function(a){
+      if(a.textContent.trim()!=='edit') return;
+      a.className='tkt-rowedit'; a.setAttribute('aria-label','Edit');
+      a.innerHTML=ICON+'><path d="M7 7h-1a2 2 0 0 0 -2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2 -2v-1"/><path d="M20.385 6.585a2.1 2.1 0 0 0 -2.97 -2.97l-8.415 8.385v3h3l8.385 -8.415z"/><path d="M16 5l3 3"/></svg>';
+    });
+  }
+  // the ticket view's actions all live on the page itself, so its submenu is hidden; so is any submenu whose links are all hidden
+  function bareSubmenu(){
     var m=document.querySelector('.submenu'); if(!m) return;
-    var w=document.createElement('span'), r=document.createElement('input');
-    w.className='tkt-zoom'; r.type='range'; r.min=70; r.max=160; r.step=5; r.value=z; r.title='Page zoom '+z+'%; double-click for 100%';
-    r.addEventListener('input',function(){ zoom(parseInt(r.value,10)); r.title='Page zoom '+z+'%; double-click for 100%'; });
-    r.addEventListener('dblclick',function(){ r.value=100; zoom(100); r.title='Page zoom 100%; double-click for 100%'; });
-    w.appendChild(r); m.insertBefore(w,m.firstChild);
+    var shown=[].some.call(m.children,function(c){ return getComputedStyle(c).display!=='none'; });
+    if(document.querySelector('.tkt-nav')||!shown) m.classList.add('tkt-bare');
   }
   document.addEventListener('DOMContentLoaded',function(){
-    zoomSlider();
+    zoomButtons();
+    bareSubmenu();
+    reportCard();
     facets();
     var b=document.getElementById('tkt-gh'), d=document.getElementById('tkt-ghdrop');
     if(!b||!d) return;
@@ -562,27 +679,54 @@ $prism<script nonce="\$nonce">
 <header>
   <div class="container">
     <div class='logo'>
-      <h1>\$<project_name><small> &nbsp;\$<title></small></h1>
+      <h1><a class="tkt-home" href="\$home/rptview?title=Recent+Activity" aria-label="Recent Activity">\$<project_name></a><small> &nbsp;\$<title></small></h1>
     </div>
     <nav class="mainmenu" title="Main Menu">
       <ul>
         <th1>
-          html "<li class='tkt-hb'><a id='hbbtn' href='\$home/sitemap' aria-label='Site Map'><img class='tkt-fossil' src='\$home/logo' alt='Site Map'></a></li>\\n"
+          html "<li class='tkt-hb'><a id='hbbtn' href='\$home/sitemap' aria-label='Site Map'><svg class='tkt-fossil' viewBox='0 0 24 24' width='18' height='18' fill='currentColor' aria-hidden='true'><path d='M12.571 0c-.699.022-2.041.555-3.458 1.419C7.464 2.42 6.258 3.538 6.16 4.108c-.008.009-.019.014-.026.023-.563.746.203 2.277 1.711 3.414 1.408 1.063 2.958 1.397 3.617.832.518-.09 1.227-1.776 1.627-3.94.383-2.054.35-3.812-.045-4.214-.006-.02.001-.048-.01-.066-.069-.113-.23-.163-.463-.156zm-2.277 2.936c-.164.193-.329.383-.492.605-.217.296-.403.587-.568.866a5.705 5.705 0 00-.908-.432 14.052 14.052 0 001.785-.914c.067-.04.118-.084.183-.125zm.912 1.084c-.004.024-.01.043-.015.066a16.33 16.33 0 00-.227 1.78 6.106 6.106 0 00-.654-.674c.215-.241.436-.507.652-.801.093-.127.16-.246.244-.371zm-3.14 4.002c-.41-.075-.968 1.14-1.246 2.706-.276 1.566-.164 2.897.246 2.969.41.072.972-1.141 1.248-2.707.276-1.566.164-2.896-.248-2.968zm-5.56 2.708c-.072.032-.026.314.103.625.132.312.297.539.37.51.074-.031.025-.311-.104-.623-.13-.312-.295-.54-.37-.512zm-.602.506c-.035-.005-.061 0-.076.018-.062.067.083.298.322.512.24.215.483.332.545.265.06-.07-.084-.298-.324-.513-.18-.16-.361-.267-.467-.282zm-.224.684c-.118 0-.197.02-.205.058-.017.077.247.205.587.282.343.078.636.078.653.002.017-.08-.248-.204-.588-.284a2.163 2.163 0 00-.447-.058zm1.296.144c-.251.067-.235.954.036 1.98.27 1.03.695 1.81.945 1.745.25-.067.234-.954-.037-1.98-.271-1.03-.694-1.812-.944-1.745zm10.394.186c-.072-.031-.237.198-.369.51-.13.311-.178.59-.103.62.072.032.24-.197.369-.51.13-.31.178-.591.103-.62zm.61.504c-.105.015-.285.12-.463.281-.238.213-.382.445-.323.512.058.064.304-.057.541-.27.238-.213.38-.443.32-.508-.014-.016-.04-.02-.075-.015zm-7.625.593c-.34.035-.86.369-1.326.883-.621.686-.914 1.437-.652 1.672.261.237.978-.125 1.601-.81.621-.689.912-1.437.65-1.674-.065-.059-.16-.082-.273-.07zm7.85.092c-.119 0-.276.018-.446.057-.343.077-.607.202-.59.281.017.077.31.077.652 0 .34-.077.607-.202.588-.28-.008-.037-.087-.057-.205-.058zm-6.13.168a.15.15 0 00-.099.028c-.21.163.143.978.793 1.82.647.841 1.346 1.393 1.557 1.23.21-.16-.148-.977-.795-1.818-.567-.737-1.172-1.251-1.455-1.26zm4.557.043c-.267-.03-.843.36-1.387.96-.62.685-.966 1.386-.767 1.563.196.18.861-.232 1.482-.917.621-.686.964-1.385.768-1.565a.17.17 0 00-.096-.04zm-5.603.133c-.386.082-.48 1.2-.205 2.492.273 1.292.815 2.275 1.2 2.193.387-.081.481-1.2.208-2.49-.276-1.292-.815-2.279-1.203-2.195zm15.448 2.459c-.13-.055-.48.471-.78 1.174-.297.705-.432 1.323-.3 1.378.13.056.48-.47.777-1.173.297-.705.433-1.324.303-1.38zm-9.503.412c-.07.031-.024.31.105.621.132.312.298.542.367.514.072-.031.027-.31-.105-.621-.13-.312-.295-.543-.367-.514zm-.6.506c-.035-.005-.062 0-.078.017-.06.07.087.297.324.51.238.213.481.33.541.264.06-.067-.083-.297-.32-.51-.178-.158-.36-.266-.467-.281zm-.224.681c-.118 0-.195.019-.203.057-.017.079.245.204.585.283.343.077.636.077.653 0 .016-.077-.246-.204-.586-.281a2.133 2.133 0 00-.45-.059zm1.37.21c-.26 0-.476.75-.476 1.675s.215 1.676.477 1.676c.26 0 .478-.75.478-1.676 0-.926-.217-1.676-.478-1.676zm-5.175.333a.235.235 0 00-.133.045c-.294.216.04 1.17.744 2.13.703.962 1.514 1.564 1.807 1.35.295-.215-.035-1.171-.74-2.13-.617-.842-1.315-1.41-1.678-1.395zm13.02.522c-.105-.094-.601.297-1.105.873-.503.575-.824 1.119-.718 1.213.108.093.603-.298 1.107-.873.504-.576.825-1.12.717-1.213zm-11.014.443c-.113-.005-.194.019-.23.074-.144.223.46.875 1.353 1.453.89.58 1.73.872 1.875.649.146-.223-.46-.877-1.35-1.457-.667-.434-1.308-.704-1.648-.719zM8.73 20.451c-.266 0-.48.75-.48 1.675 0 .926.214 1.676.48 1.676s.482-.75.482-1.676c0-.925-.216-1.675-.482-1.675zm-3.644.06c-.072.031-.026.313.103.625.132.312.297.539.37.51.074-.031.025-.312-.104-.623-.13-.312-.295-.54-.37-.512zm14.296.477c-.368-.04-1.127.127-1.96.453-1.107.434-1.929.984-1.833 1.228.096.242 1.074.093 2.181-.342 1.11-.434 1.932-.985 1.836-1.23-.024-.06-.102-.096-.224-.11zm-14.898.029c-.035-.005-.061 0-.076.018-.062.067.082.298.322.511.24.216.483.333.545.266.06-.07-.084-.298-.324-.514-.18-.16-.362-.267-.467-.281zm-.223.685c-.118 0-.196.019-.205.057-.016.08.248.204.588.283.343.077.636.077.653 0 .016-.077-.248-.204-.588-.281a2.116 2.116 0 00-.448-.059zm1.29.047c-.114-.005-.194.019-.231.075-.144.223.461.875 1.353 1.453.89.58 1.731.871 1.875.648.147-.223-.46-.877-1.35-1.457-.666-.433-1.307-.704-1.648-.719zm6.628.09c-.865-.036-1.493.081-1.527.32-.046.317.98.73 2.289.92 1.311.19 2.415.087 2.46-.232.046-.317-.98-.73-2.292-.92a9.203 9.203 0 00-.93-.088z'/></svg></a></li>\\n"
           builtin_request_js hbmenu.js
+          # menu entries are collected here and drawn as icon buttons after the others, see below
           set once 1
+          set items {}
           foreach {name url expr class} \$mainmenu {
             if {![capexpr \$expr]} continue
             if {\$once && [string match \$url\\[/?#\\]* /\$current_page/]} {
               set class "active \$class"
               set once 0
             }
-            html "<li class='\$class'>"
             if {[string match /* \$url]} {set url \$home\$url}
-            html "<a href='\$url'>\$name</a></li>\\n"
+            set items "\$items [list [list \$name \$url \$class]]"
           }
         </th1>
-        <li class="tkt-themeli"><a id="tkt-theme" href="#" title="Toggle dark mode"><svg class="tkt-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Dark"><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/></svg><svg class="tkt-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Light"><path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/></svg></a></li>
-$links      </ul>
+$links        <li class="tkt-themeli"><a id="tkt-theme" href="#" title="Toggle dark mode"><svg class="tkt-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Dark"><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/></svg><svg class="tkt-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Light"><path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/></svg></a></li>
+        <th1>
+          # the menu entries as tabler icon buttons, floated right beside the others; floats stack right to left, so they go last-first.
+          # an entry without an icon here keeps its text
+          for {set i [expr {[llength \$items]-1}]} {\$i >= 0} {set i [expr {\$i-1}]} {
+            set it [lindex \$items \$i]
+            set name [lindex \$it 0]
+            set ico ""
+            if {\$name eq "Reports"} {
+              set ico {<path d='M8 5h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h5.697'/><path d='M18 14v4h4'/><path d='M18 11v-4a2 2 0 0 0 -2 -2h-2'/><path d='M8 3m0 2a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2z'/><path d='M18 18m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0'/><path d='M8 11h4'/><path d='M8 15h3'/>}
+            } elseif {\$name eq "Recent Activity"} {
+              set ico {<path d='M15 5l0 2'/><path d='M15 11l0 2'/><path d='M15 17l0 2'/><path d='M5 5h14a2 2 0 0 1 2 2v3a2 2 0 0 0 0 4v3a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-3a2 2 0 0 0 0 -4v-3a2 2 0 0 1 2 -2'/>}
+            } elseif {\$name eq "Login"} {
+              set ico {<path d='M15 8v-2a2 2 0 0 0 -2 -2h-7a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2 -2v-2'/><path d='M21 12h-13l3 -3'/><path d='M11 15l-3 -3'/>}
+            }
+            set end ""
+            if {\$i == [llength \$items]-1} {set end " tkt-groupend"}
+            html "<li class='tkt-menuicon\$end [lindex \$it 2]'><a href='[lindex \$it 1]' aria-label='\$name'>"
+            if {[string length \$ico] > 0} {
+              html "<svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'>\$ico</svg>"
+            } else {
+              html \$name
+            }
+            html "</a></li>\\n"
+          }
+        </th1>
+        <th1>if {[anycap n]} {html "<li class='tkt-newli'><a href='\$home/tktnew' aria-label='New Ticket'><svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M14 3v4a1 1 0 0 0 1 1h4'/><path d='M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z'/><path d='M12 11l0 6'/><path d='M9 14l6 0'/></svg></a></li>\\n"}</th1>
+      </ul>
     </nav>
     <nav id="hbdrop" class='hbdrop' title="sitemap"></nav>
   </div>
@@ -622,13 +766,39 @@ skin_css() {
 .mainmenu ul li.active { background-image: none; }
 /* blitz caps the page at 900px; use the window instead, with an 8% gutter each side */
 div.container { max-width: none; width: 84%; }
-/* page zoom slider, floated to the right end of the submenu; about as wide as the three menu icons above it */
-.submenu .tkt-zoom { float: right; width: 128px; margin: 0 15px; }
-.submenu .tkt-zoom input { width: 100%; margin: 0; vertical-align: middle; accent-color: #3b5c6b; cursor: pointer; }
-html[data-theme=dark] .submenu .tkt-zoom input { accent-color: #79b8d6; }
+/* the project name in the logo links to recent activity, but keeps the heading's look */
+header .logo a.tkt-home { color: inherit; text-decoration: none; }
+/* one header row: the logo on the left, the menu's icons on the right. fossil positions the sitemap dropdown absolutely,
+   which in a centered flex row would put its top above the page, so it is pinned to the header's bottom edge instead */
+header .container { display: flex; align-items: center; position: relative; }
+header .logo { flex: 1 1 auto; }
+header nav.mainmenu { flex: 0 0 auto; }
+header nav.mainmenu ul { border-top: 0; }
+header nav#hbdrop { top: 100%; left: 0; right: 0; z-index: 20; }
+/* blitz spaces the sitemap's entries for touch; tighten them into a compact list */
+#hbdrop li { margin: 0; line-height: 1.6; list-style: none; }
+#hbdrop li a { padding: 1px 6px; }
+#hbdrop ul ul { margin: 0 0 4px 0; padding-left: 18px; }
 /* the ticket view's field table spans the page; the label column stays as narrow as its text */
 table.label-value { width: 100%; }
 table.label-value td.tktDspLabel { width: 1%; white-space: nowrap; }
+/* in a card the field table drops blitz's boxed cells: muted labels, values on the same line, hairline rules between rows */
+html .tkt-card table.label-value { border: 0; border-collapse: collapse; margin: 0; }
+html .tkt-card table.label-value td { border: 0; background-color: transparent; padding: 6px 4px; vertical-align: top; }
+html .tkt-card table.label-value tr + tr td { border-top: 1px solid #eceff2; }
+html .tkt-card table.label-value td.tktDspLabel { padding-right: 18px; text-align: left; font-weight: normal; color: #6a737d; }
+.tkt-card-fields .tkt-card-body { padding: 2px 12px; }
+html[data-theme=dark] .tkt-card table.label-value td { background-color: transparent; }
+html[data-theme=dark] .tkt-card table.label-value tr + tr td { border-top-color: #2a3038; }
+html[data-theme=dark] .tkt-card table.label-value td.tktDspLabel { color: #8b949e; }
+/* the ticket view's icon row: right-aligned and muted until hovered */
+.tkt-nav { float: right; display: flex; gap: 6px; margin: 0 0 4px 12px; }
+.tkt-nav a, .tkt-nav span { display: inline-flex; color: #8a8f95; text-decoration: none; }
+.tkt-nav a:hover { color: #3b5c6b; }
+.tkt-nav .tkt-off { opacity: .35; cursor: default; }
+html[data-theme=dark] .tkt-nav a:hover { color: #79b8d6; }
+.tkt-clipped, .tkt-copied .tkt-clip { display: none; }
+.tkt-copied .tkt-clipped { display: inline; color: #1a7f37; }
 /* report tables: blitz shrinks them to .9em with tight padding; give them body size, room, and row rules */
 .report td, .report th { font-size: 1em; padding: 7px 10px; border-bottom: 1px solid #e4e4e4; vertical-align: middle; }
 .report th { text-align: left; font-weight: 600; background-color: #f0f0f0; }
@@ -638,6 +808,56 @@ html[data-theme=dark] .report td, html[data-theme=dark] .report th { border-bott
 /* clickable facets in report cells filter the table; the current filter shows in a bar above it */
 a.tkt-facet { color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor; }
 a.tkt-facet:hover { border-bottom-style: solid; }
+/* card: a rounded, labelled box. the ticket view puts its fields, the description, and each comment in one */
+.tkt-card { clear: both; margin: 0 0 1em; border: 1px solid #d8dde2; border-radius: 8px; }
+.tkt-card-label { padding: 6px 12px; border-radius: 7px 7px 0 0; font-size: .85em; font-weight: 600; letter-spacing: .02em; color: #4a5560; background-color: #f3f5f7; border-bottom: 1px solid #d8dde2; }
+.tkt-card-meta { font-weight: normal; color: #7a838c; margin-left: .4em; }
+.tkt-card-body { padding: 4px 14px; }
+.tkt-card-foot { margin: 0; padding: 8px 12px; text-align: right; border-top: 1px solid #eceff2; }
+/* a report card: the table runs edge to edge, the filter bar sits inside the padding */
+.tkt-card-report .tkt-card-body { padding: 0; overflow-x: auto; border-radius: 0 0 7px 7px; }
+.tkt-card-report table.report { width: 100%; margin: 0; border: 0; border-collapse: collapse; }
+.tkt-card-report .tkt-filterbar { margin: 8px 10px; }
+/* the row edit icon: muted until hovered; its tooltip opens to the left, since the scrolling card body would clip one below the last row */
+a.tkt-rowedit { position: relative; display: inline-flex; color: #8a8f95; text-decoration: none; }
+a.tkt-rowedit:hover { color: #3b5c6b; }
+a.tkt-rowedit svg { width: 18px; height: 18px; }
+a.tkt-rowedit[aria-label]:hover::after {
+  content: attr(aria-label); position: absolute; right: calc(100% + 6px); top: 50%; transform: translateY(-50%); z-index: 10; white-space: nowrap; pointer-events: none;
+  padding: 3px 8px; border-radius: 4px; font-size: 12px; line-height: 1.4; color: #fff; background-color: #3a4048; }
+html[data-theme=dark] a.tkt-rowedit:hover { color: #79b8d6; }
+html[data-theme=dark] a.tkt-rowedit[aria-label]:hover::after { color: #1b1f24; background-color: #d4d8de; }
+html[data-theme=dark] .tkt-card-foot { border-top-color: #2a3038; }
+/* icon tooltips: drawn from aria-label on hover, since native title tips are slow and absent in some browsers; right-anchored so they never overflow the page */
+.tkt-nav > *, .tkt-card-ctl > * { position: relative; }
+/* on the ticket view, fossil's submenu links are all redundant or empty in tkt (attach and history are in the icon row,
+   new ticket is in the main menu, check-ins and plaintext do nothing here), so the submenu goes entirely */
+.submenu.tkt-bare { display: none; }
+/* new ticket is a project action, so it lives in the main menu beside github rather than in any submenu (sml-new is the tickets page's copy) */
+.submenu a.sml-new-ticket, .submenu a.sml-new { display: none; }
+.mainmenu li.tkt-newli, .mainmenu li.tkt-menuicon { float: right; position: relative; }
+.mainmenu li.tkt-newli svg, .mainmenu li.tkt-menuicon svg { vertical-align: -0.3em; }
+/* the icons fall into groups, left to right: new ticket | activity and reports | zoom and theme | github and the fossil sitemap.
+   a gap closes each group but the last */
+.mainmenu li.tkt-newli, .mainmenu li.tkt-groupend, .mainmenu li.tkt-themeli { margin-right: 14px; }
+.tkt-nav > [aria-label]:hover::after, .tkt-card-ctl > [aria-label]:hover::after,
+.mainmenu li.tkt-newli a[aria-label]:hover::after, .mainmenu li.tkt-menuicon a[aria-label]:hover::after {
+  content: attr(aria-label); position: absolute; top: calc(100% + 4px); right: 0; z-index: 10; white-space: nowrap; pointer-events: none;
+  padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: normal; letter-spacing: 0; line-height: 1.4; color: #fff; background-color: #3a4048; }
+html[data-theme=dark] .tkt-nav > [aria-label]:hover::after, html[data-theme=dark] .tkt-card-ctl > [aria-label]:hover::after,
+html[data-theme=dark] .mainmenu li.tkt-newli a[aria-label]:hover::after, html[data-theme=dark] .mainmenu li.tkt-menuicon a[aria-label]:hover::after { color: #1b1f24; background-color: #d4d8de; }
+.tkt-card-ctl { float: right; display: inline-flex; gap: 4px; }
+.tkt-card-ctl a { display: inline-flex; color: #8a8f95; text-decoration: none; }
+.tkt-card-ctl a:hover { color: #3b5c6b; }
+.tkt-card-ctl svg { width: 16px; height: 16px; }
+.tkt-fold-down, .tkt-collapsed .tkt-fold-up { display: none; }
+.tkt-collapsed .tkt-fold-down { display: inline; }
+.tkt-collapsed .tkt-card-body, .tkt-collapsed .tkt-card-foot { display: none; }
+.tkt-collapsed .tkt-card-label { border-bottom: 0; border-radius: 7px; }
+html[data-theme=dark] .tkt-card-ctl a:hover { color: #79b8d6; }
+html[data-theme=dark] .tkt-card, html[data-theme=dark] .tkt-card-label { border-color: #30363d; }
+html[data-theme=dark] .tkt-card-label { background-color: #22272e; color: #c0c6cf; }
+html[data-theme=dark] .tkt-card-meta { color: #8b949e; }
 .tkt-filterbar { margin: 0 0 0.6em; padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; background-color: #f0f0f0; }
 .tkt-filterbar b { margin-right: 0.4em; }
 .tkt-filterbar a { margin-right: 0.8em; }
@@ -670,9 +890,8 @@ html[data-theme=dark] .token.regex, html[data-theme=dark] .token.important, html
 .mainmenu svg.tkt-sun { display: none; }
 html[data-theme=dark] .mainmenu svg.tkt-sun { display: inline; }
 html[data-theme=dark] .mainmenu svg.tkt-moon { display: none; }
-.mainmenu li a#hbbtn { padding-top: 4px; padding-bottom: 4px; }
-.mainmenu img.tkt-fossil { height: 1.5em; width: auto; vertical-align: middle; }
-html[data-theme=dark] .mainmenu img.tkt-fossil { filter: invert(0.9) hue-rotate(180deg); }
+/* the fossil mark from simple-icons (cc0), drawn in the link color like the tabler icons beside it */
+.mainmenu svg.tkt-fossil { vertical-align: -0.3em; }
 .mainmenu li.tkt-github { float: right; position: relative; }
 .mainmenu li.tkt-github a#tkt-gh svg { vertical-align: -0.2em; }
 nav.tkt-ghdrop { display: none; position: absolute; right: 0; top: 100%; min-width: 8em; background-color: white; border: 2px solid #ccc; z-index: 20; }
@@ -709,21 +928,8 @@ html[data-theme=dark] code, html[data-theme=dark] kbd, html[data-theme=dark] foo
 html[data-theme=dark] td.tktDspValue, html[data-theme=dark] div.tktDspValue { background-color: transparent; }
 html[data-theme=dark] .report th { background-color: #22272e; color: #e6e9ed; }
 html[data-theme=dark] .report thead+tbody tr:hover { background-color: #2a3038 !important; }
-/* report rows come with inline pastel backgrounds from the bgcolor column; map each known one to a dark tint,
-   after a catch-all so an unknown color still lands on a readable neutral */
-html[data-theme=dark] .report tr[style*="background-color"], html[data-theme=dark] td[style*="background-color"] { background-color: #2a2f36 !important; }
-html[data-theme=dark] .report tr[style*="#f2dcdc"], html[data-theme=dark] td[style*="#f2dcdc"] { background-color: #472a2a !important; }
-html[data-theme=dark] .report tr[style*="#bde5d6"], html[data-theme=dark] td[style*="#bde5d6"] { background-color: #1f3d3a !important; }
-html[data-theme=dark] .report tr[style*="#cfe8bd"], html[data-theme=dark] td[style*="#cfe8bd"] { background-color: #2c3d22 !important; }
-html[data-theme=dark] .report tr[style*="#cacae5"], html[data-theme=dark] td[style*="#cacae5"] { background-color: #2f2f4a !important; }
-html[data-theme=dark] .report tr[style*="#f8e6cc"], html[data-theme=dark] td[style*="#f8e6cc"] { background-color: #46341f !important; }
-html[data-theme=dark] .report tr[style*="#fdf5d6"], html[data-theme=dark] td[style*="#fdf5d6"] { background-color: #3f3a1e !important; }
-html[data-theme=dark] .report tr[style*="#e2f0d9"], html[data-theme=dark] td[style*="#e2f0d9"] { background-color: #23392a !important; }
-html[data-theme=dark] .report tr[style*="#e8e8e8"], html[data-theme=dark] td[style*="#e8e8e8"],
-html[data-theme=dark] .report tr[style*="#c8c8c8"], html[data-theme=dark] td[style*="#c8c8c8"] { background-color: #2a2f36 !important; }
-html[data-theme=dark] td[style*="#ffffff"] { background-color: transparent !important; }
-html[data-theme=dark] .report tr[style] td, html[data-theme=dark] td[style*="background-color"] { color: #d4d8de; }
-html[data-theme=dark] .report tr[style] a { color: #79b8d6; }
+html[data-theme=dark] .report td { color: #d4d8de; }
+html[data-theme=dark] .report a { color: #79b8d6; }
 html[data-theme=dark] .tkt-filterbar { background-color: #22272e; border-color: #30363d; }
 html[data-theme=dark] pre, html[data-theme=dark] pre.verbatim, html[data-theme=dark] textarea,
 html[data-theme=dark] input[type=text], html[data-theme=dark] input[type=search], html[data-theme=dark] input[type=password],
@@ -737,64 +943,45 @@ html[data-theme=dark] mark { background: #7a6a00; color: #fff; }
 EOF
 }
 
-# web reports, one row each in fossil's reportfmt table. a 'bgcolor' column colors the row and a column named '#' links to the ticket
+# web reports, one row each in fossil's reportfmt table. a column named '#' links to the ticket.
+# rows carry no color and the reports no key: status and severity are sortable, filterable columns instead
 reports() {
   cat <<'EOF'
 CREATE TEMP TABLE r(title, cols, sqlcode);
-INSERT INTO r VALUES('Open Tickets', '#ffffff Key:
-#f2dcdc Critical
-#f8e6cc Severe
-#fdf5d6 Important
-#e2f0d9 Minor
-#e8e8e8 Cosmetic', 'SELECT
-  CASE severity WHEN ''Critical'' THEN ''#f2dcdc'' WHEN ''Severe'' THEN ''#f8e6cc''
-       WHEN ''Important'' THEN ''#fdf5d6'' WHEN ''Minor'' THEN ''#e2f0d9'' ELSE ''#e8e8e8'' END AS ''bgcolor'',
+INSERT INTO r VALUES('Open Tickets', '', 'SELECT
   substr(tkt_uuid,1,10) AS ''#'',
   datetime(tkt_mtime) AS ''mtime'',
   status, severity, subsystem, tags, title
 FROM ticket
 WHERE status IN (''Open'',''WIP'')
 ORDER BY CASE severity WHEN ''Critical'' THEN 0 WHEN ''Severe'' THEN 1 WHEN ''Important'' THEN 2 WHEN ''Minor'' THEN 3 ELSE 4 END, tkt_mtime DESC');
-INSERT INTO r VALUES('Critical and Severe', '#ffffff Key:
-#f2dcdc Critical
-#f8e6cc Severe', 'SELECT
-  CASE severity WHEN ''Critical'' THEN ''#f2dcdc'' ELSE ''#f8e6cc'' END AS ''bgcolor'',
+INSERT INTO r VALUES('Critical and Severe', '', 'SELECT
   substr(tkt_uuid,1,10) AS ''#'',
   datetime(tkt_mtime) AS ''mtime'',
   status, severity, subsystem, tags, title
 FROM ticket
 WHERE status IN (''Open'',''WIP'') AND severity IN (''Critical'',''Severe'')
 ORDER BY severity, tkt_mtime DESC');
-INSERT INTO r VALUES('Recent Activity', '#ffffff Key:
-#f2dcdc Open
-#fdf5d6 WIP
-#c8c8c8 Closed', 'SELECT
-  CASE status WHEN ''Open'' THEN ''#f2dcdc'' WHEN ''WIP'' THEN ''#fdf5d6'' ELSE ''#c8c8c8'' END AS ''bgcolor'',
+INSERT INTO r VALUES('Recent Activity', '', 'SELECT
   substr(tkt_uuid,1,10) AS ''#'',
   datetime(tkt_mtime) AS ''mtime'',
   status, severity, subsystem, tags, title
 FROM ticket
 WHERE tkt_mtime > julianday(''now'',''-30 days'')
 ORDER BY tkt_mtime DESC');
-INSERT INTO r VALUES('By Tag', '#ffffff Key:
-#f2dcdc Open
-#fdf5d6 WIP', 'WITH RECURSIVE split(tkt_id, tag, rest) AS (
+INSERT INTO r VALUES('By Tag', '', 'WITH RECURSIVE split(tkt_id, tag, rest) AS (
   SELECT tkt_id, '''', trim(coalesce(tags,''''))||'' '' FROM ticket WHERE status IN (''Open'',''WIP'') AND trim(coalesce(tags,'''')) <> ''''
   UNION ALL
   SELECT tkt_id, substr(rest,1,instr(rest,'' '')-1), ltrim(substr(rest,instr(rest,'' '')+1)) FROM split WHERE rest <> ''''
 )
 SELECT
-  CASE t.status WHEN ''Open'' THEN ''#f2dcdc'' ELSE ''#fdf5d6'' END AS ''bgcolor'',
   s.tag AS ''tag'',
   substr(t.tkt_uuid,1,10) AS ''#'',
   t.status, t.severity, t.subsystem, t.title
 FROM split s JOIN ticket t ON t.tkt_id=s.tkt_id
 WHERE s.tag <> ''''
 ORDER BY s.tag, t.tkt_mtime DESC');
-INSERT INTO r VALUES('Blocked', '#ffffff Key:
-#f2dcdc Open
-#fdf5d6 WIP', 'SELECT
-  CASE status WHEN ''Open'' THEN ''#f2dcdc'' ELSE ''#fdf5d6'' END AS ''bgcolor'',
+INSERT INTO r VALUES('Blocked', '', 'SELECT
   substr(tkt_uuid,1,10) AS ''#'',
   datetime(tkt_mtime) AS ''mtime'',
   status, severity,
@@ -806,15 +993,20 @@ FROM ticket t
 WHERE status IN (''Open'',''WIP'') AND (trim(coalesce(blockers,'''')) <> ''''
   OR EXISTS (SELECT 1 FROM ticket c WHERE trim(coalesce(c.parent,'''')) = substr(t.tkt_uuid,1,10) AND c.status IN (''Open'',''WIP'')))
 ORDER BY tkt_mtime DESC');
-INSERT INTO r VALUES('Recently Closed', '#ffffff Key:
-#c8c8c8 Closed', 'SELECT
-  ''#c8c8c8'' AS ''bgcolor'',
+INSERT INTO r VALUES('Recently Closed', '', 'SELECT
   substr(tkt_uuid,1,10) AS ''#'',
   datetime(tkt_mtime) AS ''closed'',
   resolution, severity, subsystem, tags, title
 FROM ticket
 WHERE status=''Closed''
 ORDER BY tkt_mtime DESC LIMIT 100');
+INSERT INTO r VALUES('Tagged Tickets', '', 'SELECT
+  substr(tkt_uuid,1,10) AS ''#'',
+  datetime(tkt_mtime) AS ''mtime'',
+  status, severity, subsystem, tags, title
+FROM ticket
+WHERE trim(coalesce(tags,'''')) <> ''''
+ORDER BY status=''Closed'', tkt_mtime DESC');
 DELETE FROM reportfmt WHERE title IN (SELECT title FROM r);
 INSERT INTO reportfmt(owner, title, mtime, cols, sqlcode)
   SELECT 'tkt', title, strftime('%s','now'), cols, sqlcode FROM r;
@@ -930,9 +1122,10 @@ verb_tag() {
 
 verb_block() {
   need
-  local id ids='' tok hit
+  local id ids='' tok hit parent
   id=$(resolve "$1")
   shift
+  parent=$(sqlq "select trim(coalesce(parent,'')) from ticket where tkt_uuid like '$id%';")
   if [ "$1" = --clear ]; then
     ids=' '
   else
@@ -941,6 +1134,7 @@ verb_block() {
     for tok in "$@"; do
       hit=$(resolve "$tok")
       [ "$hit" != "$id" ] || die 'a ticket cannot block itself'
+      [ "$hit" != "$parent" ] || die "$hit is the parent of $id, and a parent cannot block its subtask"
       ids="$ids $hit"
     done
     ids=${ids# }
@@ -956,6 +1150,8 @@ fit_parent() {
     || die "$parent is itself a subtask, and subtasks are one level deep"
   [ -z "$child" ] || [ "$(sqlq "select count(*) from ticket where trim(coalesce(parent,'')) = '$child';")" = 0 ] \
     || die "$child has subtasks of its own, and subtasks are one level deep"
+  [ -z "$child" ] || [ "$(sqlq "select count(*) from ticket where tkt_uuid like '$child%' and ' ' || coalesce(blockers,'') || ' ' like '% $parent %';")" = 0 ] \
+    || die "$parent blocks $child, and a parent cannot block its subtask; first run: tkt block $child --clear, or block on the rest"
 }
 
 verb_parent() {

@@ -223,7 +223,7 @@ tkt block 896eb890 a39d7663e6 0991582b19
 tkt block 896eb890 --clear
 ```
 
-**Subtasks** are one level deep, held in the `parent` field as a single ten-char id. A parent cannot have a parent, and a ticket with subtasks cannot become one, so there are no cycles or trees to reason about. `tkt show` lists a ticket's `Parent` or its `Subtasks`, and the subtasks of one parent are its siblings. A parent with open subtasks counts as blocked in the Blocked report, without anything being written to its `blockers`. Closing it still works, with a note naming how many subtasks are open.
+**Subtasks** are one level deep, held in the `parent` field as a single ten-char id. A parent cannot have a parent, and a ticket with subtasks cannot become one, so there are no cycles or trees to reason about. `tkt show` lists a ticket's `Parent` or its `Subtasks`, and the subtasks of one parent are its siblings. A parent with open subtasks counts as blocked in the Blocked report, without anything being written to its `blockers`. The reverse is refused: a parent can never block its own subtask, whether you try `tkt block` or `tkt parent` first. Closing it still works, with a note naming how many subtasks are open.
 
 ```bash
 tkt parent a39d7663e6 896eb890
@@ -318,7 +318,7 @@ Running `tkt init` trims the web UI down to a tracker:
 | Feature | Behavior |
 | --- | --- |
 | Home page | The root url goes straight to the ticket list |
-| Reports | The ticket home page lists **Open Tickets** colored by severity, **Critical and Severe**, **Recent Activity** for the last 30 days, **By Tag** with one row per tag, **Blocked**, and **Recently Closed**, beside Fossil's own **All Tickets** |
+| Reports | The ticket home page lists **Open Tickets** ordered by severity, **Critical and Severe**, **Recent Activity** for the last 30 days, **By Tag** with one row per tag, **Blocked**, **Recently Closed**, and **Tagged Tickets**, beside Fossil's own **All Tickets**. Rows are not color-coded: sort by any column, or click a status, severity, or tag to filter |
 | Skin | Fossil's built-in `blitz`, linked from the header rather than copied, with a dark theme layered on top. **Dark** and **Light** in the menu flip the theme; it starts from the browser's color-scheme preference and the choice is kept in local storage, so it is per browser. A browser that used the old `?skin=` links still holds Fossil's skin cookie, which overrides the repository skin; open any page with `?skin=` once to clear it |
 | Ticket view | **Close** or **Reopen**, and **Edit or comment**, open the edit form with the fields already set |
 | New ticket form | The body goes to the description, and tags can be set |
