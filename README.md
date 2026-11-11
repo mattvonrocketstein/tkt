@@ -1,13 +1,28 @@
-<!-- header tkt "tkt" | Why #why | Install #install | Config #config | Usage #usage | Web UI #web-ui | Agents #agents | Dev #dev -->
-<p align="right"><a id="tkt"></a><a href="#tkt"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.title.dark.svg"><img align=left src="docs/img/hdr/readme.tkt.title.svg" alt="tkt"></picture></a><a href="#why"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.0.dark.svg"><img src="docs/img/hdr/readme.tkt.0.svg" alt="Why"></picture></a><a href="#install"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.1.dark.svg"><img src="docs/img/hdr/readme.tkt.1.svg" alt="Install"></picture></a><a href="#config"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.2.dark.svg"><img src="docs/img/hdr/readme.tkt.2.svg" alt="Config"></picture></a><a href="#usage"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.3.dark.svg"><img src="docs/img/hdr/readme.tkt.3.svg" alt="Usage"></picture></a><a href="#web-ui"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.4.dark.svg"><img src="docs/img/hdr/readme.tkt.4.svg" alt="Web UI"></picture></a><a href="#agents"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.5.dark.svg"><img src="docs/img/hdr/readme.tkt.5.svg" alt="Agents"></picture></a><a href="#dev"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.6.dark.svg"><img src="docs/img/hdr/readme.tkt.6.svg" alt="Dev"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
+<!-- header # tkt "tkt" | Basic Example #basic-example | Why #why | Install #install | Config #config | Usage #usage | Web UI #web-ui | Agents #agents | Dev #dev -->
+<h1><a id="tkt"></a>tkt<a href="#dev"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.7.dark.svg"><img align=right src="docs/img/hdr/readme.tkt.7.svg" alt="Dev"></picture></a><a href="#agents"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.6.dark.svg"><img align=right src="docs/img/hdr/readme.tkt.6.svg" alt="Agents"></picture></a><a href="#web-ui"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.5.dark.svg"><img align=right src="docs/img/hdr/readme.tkt.5.svg" alt="Web UI"></picture></a><a href="#usage"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.4.dark.svg"><img align=right src="docs/img/hdr/readme.tkt.4.svg" alt="Usage"></picture></a><a href="#config"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.3.dark.svg"><img align=right src="docs/img/hdr/readme.tkt.3.svg" alt="Config"></picture></a><a href="#install"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.2.dark.svg"><img align=right src="docs/img/hdr/readme.tkt.2.svg" alt="Install"></picture></a><a href="#why"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.1.dark.svg"><img align=right src="docs/img/hdr/readme.tkt.1.svg" alt="Why"></picture></a><a href="#basic-example"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.tkt.0.dark.svg"><img align=right src="docs/img/hdr/readme.tkt.0.svg" alt="Basic Example"></picture></a><br clear="all"></h1>
 <!-- /header -->
 
-<p><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/icon-dark.svg"><img align=middle src="docs/img/icon.svg" width="96" alt="tkt"></picture>
-&nbsp;&nbsp; a small alternative front-end to <a href=https://fossil-scm.org>fossil's</a> built-in <a href=https://fossil-scm.org/home/doc/trunk/www/bugtheory.wiki>bug tracker</a>.</p>
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/icon-dark.svg"><img src="docs/img/icon.svg" width="30%" alt="tkt"></picture></p>
 
-Fossil's great! A single-file tool, uses SQL under the hood, and the tracker supports a simple CLI / a Web UI / markdown out of the box.
+<strong>tkt</strong> is an alternative front-end to <a href=https://fossil-scm.org>fossil</a>.  It's opinionated and preconfigured, seeking to optimize for **bug-tracking, project-docs, and project-actions** that are simple, local-first, and friendly for agents as well as humans.  In case you're not familiar with upstream, the basic features we're building on are:
 
-**But!** If you're only interested in the tracker and not the rest of the version-control capabilities.. the interface is too large, and Fossil's default workflow model and UX are [kind of weird](#why), and `tkt` can help.
+* Single-file tool, 
+* No-frills SQL under the hood
+* Simple CLI / a Web UI / markdown support
+* Full distributed version control, forums, chat, wiki, .. 
+
+Unlike the upstream, `tkt` is less focused on version-control (you're probably using git..) and emphasizes project management, shared-blackboard, and coordination.  Fossil isn't buggy, but the default workflow model and UX are [kind of weird](#why), and more like a framework than a solution.  Fossil *is* however very flexible, so that even a humble script like `tkt` can use it as a backend and present a different model.  Some of the improvements/extensions that you get by default:
+
+* Tickets get a concept of tagging and subtickets,
+* Syntax-highlighting in markdown code-fences,
+* Tickets and wiki support mermaid diagrams
+* Simplified CLI, skills for claude/pi
+
+<a id="basic-example"></a>
+
+## Basic Example
+
+See [Usage](#usage) for more, but you get the idea:  Ideal for ultralight in-repo or offline usage by human(s). Also ideal for [agents](#agents), who are already bash / SQL natives anyway. 
 
 ```bash
 # CLI
@@ -27,35 +42,7 @@ echo "select status, count(*) as n from ticket group by status;" | tkt sql
 tkt serve
 ```
 
-See [Usage](#usage) for more, but you get the idea.  Ideal for ultralight in-project or offline usage by human(s). Also ideal for [agents](#agents), who are already bash / SQL natives anyway. 
-
 This is about as simple as it gets.  One tool, many workflows, no hassle with auth or APIs.  Track the DB to share tickets with other devs.  Ignore the DB for a private local, no clutter on jira/github issues.  You can even use it *per task* for complex work that needs more structure than a TODO list.. and then just throw away the tracker when you're done.
-
-<!-- header why "Why" | The Big One #the-big-one | The Other Ones #the-other-ones -->
-<p align="right"><a id="why"></a><a href="#why"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.why.title.dark.svg"><img align=left src="docs/img/hdr/readme.why.title.svg" alt="Why"></picture></a><a href="#the-big-one"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.why.0.dark.svg"><img src="docs/img/hdr/readme.why.0.svg" alt="The Big One"></picture></a><a href="#the-other-ones"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.why.1.dark.svg"><img src="docs/img/hdr/readme.why.1.svg" alt="The Other Ones"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
-<!-- /header -->
-
-Fossil isn't buggy, but it's weird, and more like a framework than a solution.  It *is* however very flexible, so that even a humble script like `tkt` can use it as a backend and present a different model.  
-
-Here's the stuff we're trying to work-around.
-
-### The Big One
-
-By default, actual ticket-status in fossil is buried in an append-only log.  The `New Ticket` form saves the problem statement as the ticket's first comment.  Major corrections to the ticket's actual *spec* later  appear as basically more comments.  Current status shouldn't mean replaying / reconciling a log-stream, who knows what `shun` is supposed to mean!? =P 
-
-Instead, `tkt` adds a `description` field that is replaced in place. Running `tkt edit` rewrites it, comments stay append-only beside it, and every earlier version of the description stays in fossil's change history. Nothing is shunned, and a ticket always reads as its current statement.
-
-### The Other Ones
-
-<table>
-<tr><th width="50%">Fossil</th><th width="50%"><code>tkt</code></th></tr>
-<tr><td>No tags, and no dependencies between tickets</td><td>Adds <code>tags</code> and <code>blockers</code> fields. <code>tkt block</code> checks each id as it is written, <code>tkt show</code> derives what a ticket blocks, and prose references come from fossil's own backlink index</td></tr>
-<tr><td>No command shows one ticket: <code>fossil ticket show</code> dumps a whole report as tab-separated text</td><td>The <code>tkt show</code>, <code>list</code>, and <code>search</code> verbs print markdown, cross-references included</td></tr>
-<tr><td>The <code>fossil ticket</code> command line fails silently: a missing <code>mimetype</code> renders the body as plain text, an empty value is dropped so clearing does nothing, a one-word value such as <code>-q</code> is taken as a fossil option, and one <code>+</code> character separates append from replace</td><td>Every verb sets the mimetype, clears by writing a space, refuses option-like values before calling fossil, and chooses append or replace itself</td></tr>
-<tr><td>The web ui is a whole version-control site: timeline, files, wiki, and bug tracker.  Many UX issues with the tracker, regardless of theme.</td><td>Tracker only. Landing page is tickets, menu is trimmed, many improvements for skin and UX, including syntax highlighting. Ticket detail page is *normal*, with Close/Reopen/Edit/Tags.</td></tr>
-<tr><td>The <code>fossil server</code> command listens on every network interface</td><td>Only localhost is served, one server per tracker, and a new <code>serve</code> takes over from the old one</td></tr>
-<tr><td>Installing a custom ticket setup rewrites whichever repository it is pointed at</td><td>The <code>init</code> verb refuses a repository that is not already a tkt tracker, unless given <code>--adopt</code></td></tr>
-</table> 
 
 <a id="install"></a>
 ## Install
@@ -73,7 +60,7 @@ make install
 ```
 
 <!-- header config "Config" | Tracker #location | Environment #env | Existing Repos #existing-repos -->
-<p align="right"><a id="config"></a><a href="#config"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.title.dark.svg"><img align=left src="docs/img/hdr/readme.config.title.svg" alt="Config"></picture></a><a href="#location"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.0.dark.svg"><img src="docs/img/hdr/readme.config.0.svg" alt="Tracker"></picture></a><a href="#env"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.1.dark.svg"><img src="docs/img/hdr/readme.config.1.svg" alt="Environment"></picture></a><a href="#existing-repos"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.2.dark.svg"><img src="docs/img/hdr/readme.config.2.svg" alt="Existing Repos"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
+<h2><a id="config"></a>Config<a href="#existing-repos"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.2.dark.svg"><img align=right src="docs/img/hdr/readme.config.2.svg" alt="Existing Repos"></picture></a><a href="#env"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.1.dark.svg"><img align=right src="docs/img/hdr/readme.config.1.svg" alt="Environment"></picture></a><a href="#location"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.config.0.dark.svg"><img align=right src="docs/img/hdr/readme.config.0.svg" alt="Tracker"></picture></a><br clear="all"></h2>
 <!-- /header -->
 
 <a id="location"></a>
@@ -95,6 +82,8 @@ tkt init
 ```
 
 The `tkt init` command is idempotent and also migrates: when `tkt` gains a field, every verb refuses with the field name until you run `tkt init` again.
+
+When the project already has a `.claude/` (Claude Code), `.pi/` (pi), or `.agents/` (shared agent skills, which pi also finds from subdirectories) directory beside the tracker, `tkt init` also installs or refreshes the agent skill at `<dir>/skills/tkt/SKILL.md`, and says which. It never creates those directories; without one, it prints how to install the skill by hand.
 
 <a id="env"></a>
 
@@ -119,7 +108,7 @@ TKT_DB=project.fossil tkt init --adopt
 ```
 
 <!-- header usage "Usage" | Tour #tour | Verbs #verbs | Fields #fields | Descriptions #descriptions | Cross-Refs #xrefs | SQL #sql | Output #output | Limits #limits -->
-<p align="right"><a id="usage"></a><a href="#usage"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.title.dark.svg"><img align=left src="docs/img/hdr/readme.usage.title.svg" alt="Usage"></picture></a><a href="#tour"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.0.dark.svg"><img src="docs/img/hdr/readme.usage.0.svg" alt="Tour"></picture></a><a href="#verbs"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.1.dark.svg"><img src="docs/img/hdr/readme.usage.1.svg" alt="Verbs"></picture></a><a href="#fields"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.2.dark.svg"><img src="docs/img/hdr/readme.usage.2.svg" alt="Fields"></picture></a><a href="#descriptions"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.3.dark.svg"><img src="docs/img/hdr/readme.usage.3.svg" alt="Descriptions"></picture></a><a href="#xrefs"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.4.dark.svg"><img src="docs/img/hdr/readme.usage.4.svg" alt="Cross-Refs"></picture></a><a href="#sql"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.5.dark.svg"><img src="docs/img/hdr/readme.usage.5.svg" alt="SQL"></picture></a><a href="#output"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.6.dark.svg"><img src="docs/img/hdr/readme.usage.6.svg" alt="Output"></picture></a><a href="#limits"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.7.dark.svg"><img src="docs/img/hdr/readme.usage.7.svg" alt="Limits"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
+<h2><a id="usage"></a>Usage<a href="#limits"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.7.dark.svg"><img align=right src="docs/img/hdr/readme.usage.7.svg" alt="Limits"></picture></a><a href="#output"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.6.dark.svg"><img align=right src="docs/img/hdr/readme.usage.6.svg" alt="Output"></picture></a><a href="#sql"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.5.dark.svg"><img align=right src="docs/img/hdr/readme.usage.5.svg" alt="SQL"></picture></a><a href="#xrefs"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.4.dark.svg"><img align=right src="docs/img/hdr/readme.usage.4.svg" alt="Cross-Refs"></picture></a><a href="#descriptions"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.3.dark.svg"><img align=right src="docs/img/hdr/readme.usage.3.svg" alt="Descriptions"></picture></a><a href="#fields"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.2.dark.svg"><img align=right src="docs/img/hdr/readme.usage.2.svg" alt="Fields"></picture></a><a href="#verbs"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.1.dark.svg"><img align=right src="docs/img/hdr/readme.usage.1.svg" alt="Verbs"></picture></a><a href="#tour"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.usage.0.dark.svg"><img align=right src="docs/img/hdr/readme.usage.0.svg" alt="Tour"></picture></a><br clear="all"></h2>
 <!-- /header -->
 
 <a id="tour"></a>
@@ -181,6 +170,14 @@ For the browser, see [Web UI](#web-ui).
 | `tkt serve [port=...]` | The web ui, in the foreground, replacing any server this tracker already has |
 | `tkt stop` | Stop the tracker's server, from any terminal |
 | `tkt status` | Print the server's url, or fail when none is running |
+| `tkt wiki ls [prefix]` | Wiki pages as a markdown table, optionally only those under `prefix/`; alias `list` |
+| `tkt wiki get <page>` | A page's markdown on stdout, its version on stderr; alias `show` |
+| `tkt wiki put <page> [--base <v>]` | Create or replace a page from stdin, always as markdown; unchanged text is skipped; `--base` refuses if the page changed since that version |
+| `tkt wiki rm <page> [--base <v>]` | Retire a page; fossil keeps its history |
+| `tkt wiki cp <template> <new-page>` | Start a page from a `templates/` page; another source needs `--force`; alias `copy` |
+| `tkt action list` | The [project actions](#actions), from `.tkt.json`; needs jq |
+| `tkt action run <name> [<id>]` | Run one as its web button does, streaming its log; exits with its code |
+| `tkt action clean [--keep <n>]` | Retire all but the newest `n` finished jobs, 20 by default, to `$TMPDIR/tkt-jobs/` |
 | `tkt skill [install [--project]]` | Print or install the [Claude Code Skill](#skill) |
 | `tkt run <fossil args...>` | Any fossil command against the tracker |
 
@@ -258,8 +255,8 @@ The `show`, `list`, `search`, and `todo` verbs print markdown, and `todo` also t
 - A value that is a single word starting with a dash, such as `-q`, is refused, because fossil would read it as one of its own options. Multi-word values such as a markdown bullet list are fine.
 - The `tkt run` verb passes its arguments to fossil unchanged, destructive commands included. It is the escape hatch, not part of the safe surface.
 
-<!-- header web-ui "Web UI" | Serving #serving | What Init Changes #init-changes -->
-<p align="right"><a id="web-ui"></a><a href="#web-ui"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.web-ui.title.dark.svg"><img align=left src="docs/img/hdr/readme.web-ui.title.svg" alt="Web UI"></picture></a><a href="#serving"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.web-ui.0.dark.svg"><img src="docs/img/hdr/readme.web-ui.0.svg" alt="Serving"></picture></a><a href="#init-changes"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.web-ui.1.dark.svg"><img src="docs/img/hdr/readme.web-ui.1.svg" alt="What Init Changes"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
+<!-- header web-ui "Web UI" | Gallery #gallery | Serving #serving | Project Actions #actions | What Init Changes #init-changes -->
+<h2><a id="web-ui"></a>Web UI<a href="#init-changes"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.web-ui.3.dark.svg"><img align=right src="docs/img/hdr/readme.web-ui.3.svg" alt="What Init Changes"></picture></a><a href="#actions"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.web-ui.2.dark.svg"><img align=right src="docs/img/hdr/readme.web-ui.2.svg" alt="Project Actions"></picture></a><a href="#serving"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.web-ui.1.dark.svg"><img align=right src="docs/img/hdr/readme.web-ui.1.svg" alt="Serving"></picture></a><a href="#gallery"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.web-ui.0.dark.svg"><img align=right src="docs/img/hdr/readme.web-ui.0.svg" alt="Gallery"></picture></a><br clear="all"></h2>
 <!-- /header -->
 
 <a id="gallery"></a>
@@ -269,7 +266,12 @@ The `show`, `list`, `search`, and `todo` verbs print markdown, and `todo` also t
 <tr><td align="center"><a href="docs/img/shots/index-light.png"><img src="docs/img/shots/index-light.png" width="260" alt="All tickets, light"></a><br><sub>All tickets, light</sub></td><td align="center"><a href="docs/img/shots/index-dark.png"><img src="docs/img/shots/index-dark.png" width="260" alt="All tickets, dark"></a><br><sub>All tickets, dark</sub></td><td align="center"><a href="docs/img/shots/report-activity.png"><img src="docs/img/shots/report-activity.png" width="260" alt="Recent activity"></a><br><sub>Recent activity</sub></td></tr>
 <tr><td align="center"><a href="docs/img/shots/detail-light.png"><img src="docs/img/shots/detail-light.png" width="260" alt="Ticket detail"></a><br><sub>Ticket detail</sub></td><td align="center"><a href="docs/img/shots/detail-dark.png"><img src="docs/img/shots/detail-dark.png" width="260" alt="Ticket detail, dark"></a><br><sub>Ticket detail, dark</sub></td><td align="center"><a href="docs/img/shots/detail-blocked.png"><img src="docs/img/shots/detail-blocked.png" width="260" alt="Blocked ticket"></a><br><sub>Blocked ticket</sub></td></tr>
 <tr><td align="center"><a href="docs/img/shots/report-open.png"><img src="docs/img/shots/report-open.png" width="260" alt="Open tickets"></a><br><sub>Open tickets</sub></td><td align="center"><a href="docs/img/shots/report-tags.png"><img src="docs/img/shots/report-tags.png" width="260" alt="By tag"></a><br><sub>By tag</sub></td><td align="center"><a href="docs/img/shots/new-ticket.png"><img src="docs/img/shots/new-ticket.png" width="260" alt="New ticket"></a><br><sub>New ticket</sub></td></tr>
+<tr><td align="center"><a href="docs/img/shots/detail-pikchr-light.png"><img src="docs/img/shots/detail-pikchr-light.png" width="260" alt="Pikchr diagram"></a><br><sub>Pikchr diagram</sub></td><td align="center"><a href="docs/img/shots/detail-pikchr-dark.png"><img src="docs/img/shots/detail-pikchr-dark.png" width="260" alt="Pikchr diagram, dark"></a><br><sub>Pikchr diagram, dark</sub></td><td></td></tr>
+<tr><td align="center"><a href="docs/img/shots/detail-mermaid-light.png"><img src="docs/img/shots/detail-mermaid-light.png" width="260" alt="Mermaid mindmap"></a><br><sub>Mermaid mindmap</sub></td><td align="center"><a href="docs/img/shots/detail-mermaid-dark.png"><img src="docs/img/shots/detail-mermaid-dark.png" width="260" alt="Mermaid mindmap, dark"></a><br><sub>Mermaid mindmap, dark</sub></td><td align="center"><a href="docs/img/shots/detail-mermaid-state-dark.png"><img src="docs/img/shots/detail-mermaid-state-dark.png" width="260" alt="Mermaid state diagram"></a><br><sub>Mermaid state diagram</sub></td></tr>
+<tr><td align="center"><a href="docs/img/shots/actions-light.png"><img src="docs/img/shots/actions-light.png" width="260" alt="Project actions"></a><br><sub>Project actions</sub></td><td align="center"><a href="docs/img/shots/actions-dark.png"><img src="docs/img/shots/actions-dark.png" width="260" alt="Project actions, dark"></a><br><sub>Project actions, dark</sub></td><td align="center"><a href="docs/img/shots/job-log.png"><img src="docs/img/shots/job-log.png" width="260" alt="Job log"></a><br><sub>Job log</sub></td></tr>
 </table>
+
+`docs/tools/gallery.py` regenerates these from a seeded demo tracker.
 
 <a id="serving"></a>
 ### Serving
@@ -310,6 +312,67 @@ To keep it running without a terminal, background it yourself:
 nohup tkt serve >/dev/null 2>&1 &
 ```
 
+<a id="actions"></a>
+### Project Actions
+
+Actions are buttons that run project commands on the server: tests, a build, a deploy check. They show on every ticket and on the actions page at `/ext/tkt`, behind the settings icon in the menu, and `tkt action run` runs the same ones from the command line. They need [jq](https://jqlang.org).
+
+They are configured in `.tkt.json` beside the tracker, under its `actions` key. The file is json once its whole-line `//` comments are dropped, so it can explain itself. `tkt init` writes a starting one when there is none, holding the format in its comments and one action, **Clean Jobs**; it never touches a file that exists. The old `config/Actions` wiki page is no longer read, and `tkt init` and `tkt action list` say so while it exists.
+
+```js
+// Test runs for the ticket at hand.
+{
+  "actions": [
+    {"name": "test", "label": "Run tests", "icon": "player-play", "command": ["make", "test"]},
+    {"name": "grep", "label": "Find mentions", "comment": true, "command": ["git", "grep", "-n", "{ticket}"]}
+  ]
+}
+```
+
+- **name**: lowercase letters, digits, and dashes; it is part of the url
+- **label**: the button text; defaults to the name
+- **command**: the argv, run from the tracker's directory without a shell, so arguments may hold spaces. `{ticket}` becomes the ticket's id, `{repo}` the tracker's path, and `{tkt}` the path of tkt itself, for actions that call it back
+- **skill**: instead of `command`, a tkt skill instruction for the `agent` to run on the ticket; see below
+- **icon**: optional, a [tabler icon](https://tabler.io/icons) name such as `player-play`. It is the one part of the web UI loaded from a CDN rather than stored, since mirroring the whole set is too much; the button keeps its label and a tooltip, so offline it simply has no icon
+- **comment**: when true, the exit code and the last 40 lines of output are posted as a comment to the ticket the action ran from, by the user who pressed the button
+
+A ticket relates to a run in three ways, and each has one rule:
+
+| | Rule |
+| --- | --- |
+| **Input** | An action whose command uses `{ticket}` is a *ticket action*: it runs only against a ticket, so its button shows only on ticket pages and `tkt action run` needs an id. Any other is a *project action*, with a button on the actions page and on every ticket |
+| **Output** | `comment` posts to the ticket the run started from, for either kind. A project action run from the actions page has no ticket, and its job page says the comment was not posted |
+| **Context** | A run records the ticket it started from, when there is one, and links to it |
+
+So `make test` is a project action: run it from the actions page for a plain check, or from a ticket to record the result there. `git grep -n {ticket}` is a ticket action.
+
+An action can hand a ticket to an agent. `skill` stands in for `command`: its words follow `/tkt {ticket}` to make a [tkt skill](#skill) instruction, and that prompt fills `{prompt}` in the top-level `agent`, the one argv every skill action runs. tkt is not tied to any agent; this is Claude Code, headless, with the tracker, read-only git, and read-only file tools as its only tools:
+
+```json
+{
+  "agent": ["claude", "-p", "{prompt}", "--permission-mode", "dontAsk", "--allowedTools", "Bash(tkt:*)",
+    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob"],
+  "actions": [
+    {"name": "groom", "label": "Groom", "icon": "wand", "skill": ["groom"]},
+    {"name": "review", "label": "Review", "icon": "eye-check", "skill": ["review"]}
+  ]
+}
+```
+
+A skill action is always a ticket action, and is skipped while there is no `agent` with a `{prompt}`; an action with a `command` ignores `skill`. `groom` rewrites the ticket; `review` reviews the code, usually the uncommitted diff and any commits for the ticket, against its requirements. Inside a job, every `tkt` command notes on stderr that it runs inside a project action, from `TKT_JOB` and `TKT_ACTION`; the skill then posts its review as a comment on the ticket, where in an interactive session it would only reply.
+
+Fossil runs actions with a bare environment. tkt gives them back the server user's `HOME`, and their `PATH` starts with the tkt that runs them, then `~/.local/bin`. So plain `tkt` in an action, or in an agent it starts, is the same tkt, and a tool installed in `~/.local/bin` finds its settings and login; anything else is best given by its full path.
+
+```bash
+tkt action list
+tkt action run test
+tkt action run grep 1f3a9c
+```
+
+Each run is a job, kept in `.tkt.fossil.jobs/` beside the tracker with its command, log, and exit code. A button starts the job in the background and opens its page, which follows the log until it ends; long logs show their last 200 lines, with a link to the rest. A job already running is not started twice: a project action runs once at a time, a ticket action once per ticket, and its button opens the running job instead. Jobs end with the server when it is stopped with Ctrl-C. Clean Jobs, or `tkt action clean`, moves all but the newest 20 finished jobs, directory and record alike, to `$TMPDIR/tkt-jobs/<project>/`: nothing is deleted, and the system clears its temp dir in its own time. It never moves a running job.
+
+Fossil serves the actions by running `tkt` itself as a CGI extension: `tkt serve` links it into `.tkt.fossil.ext/` and passes `--extroot`. A server started some other way, such as `fossil ui`, has no actions, and the ticket page simply shows no buttons.
+
 <a id="init-changes"></a>
 ### What Init Changes
 
@@ -323,11 +386,12 @@ Running `tkt init` trims the web UI down to a tracker:
 | Ticket view | **Close** or **Reopen**, and **Edit or comment**, open the edit form with the fields already set |
 | New ticket form | The body goes to the description, and tags can be set |
 | Edit form | Appends a markdown comment, and replaces the description in place |
+| Page scripts | Prism, for syntax highlighting, and mermaid, for diagrams, are fetched from cdnjs once and stored in the tracker as Fossil unversioned files, so the web UI works offline. The three main scripts must match hashes pinned in `tkt`. Prism grammars are stored for about 50 common languages; a fence in any other language stays plain. Storing them adds about 2MB to the tracker. If the fetch fails, pages load the scripts from cdnjs, and a later `tkt init` tries again. `TKT_HIGHLIGHT=0` and `TKT_MERMAID=0` leave each one out |
 
 Blockers and parents stay command-line only, since `tkt block` and `tkt parent` are what check the ids.
 
-<!-- header agents "Agents & AI" | Rules for Agents #agent-rules | Claude Code Skill #skill -->
-<p align="right"><a id="agents"></a><a href="#agents"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.agents.title.dark.svg"><img align=left src="docs/img/hdr/readme.agents.title.svg" alt="Agents &amp; AI"></picture></a><a href="#agent-rules"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.agents.0.dark.svg"><img src="docs/img/hdr/readme.agents.0.svg" alt="Rules for Agents"></picture></a><a href="#skill"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.agents.1.dark.svg"><img src="docs/img/hdr/readme.agents.1.svg" alt="Claude Code Skill"></picture></a><br clear="all"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/_rule.dark.svg"><img width=2000 height=1 src="docs/img/hdr/_rule.svg" alt=""></picture></p>
+<!-- header agents "Agents & AI" | Rules for Agents #agent-rules | Claude Code Skill #skill | Pi Skill #pi-skill -->
+<h2><a id="agents"></a>Agents &amp; AI<a href="#pi-skill"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.agents.2.dark.svg"><img align=right src="docs/img/hdr/readme.agents.2.svg" alt="Pi Skill"></picture></a><a href="#skill"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.agents.1.dark.svg"><img align=right src="docs/img/hdr/readme.agents.1.svg" alt="Claude Code Skill"></picture></a><a href="#agent-rules"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.agents.0.dark.svg"><img align=right src="docs/img/hdr/readme.agents.0.svg" alt="Rules for Agents"></picture></a><br clear="all"></h2>
 <!-- /header -->
 
 You might not know this, but you've already made a deal with your agents.  Either you give them a place to *think into*, or else they will comment-spam a massive amount of chain-of-thought logorrhea into everything they touch.  
@@ -337,6 +401,7 @@ Tickets can help, and `tkt` in particular is easy for them to drive.
 Most of the things in [Why](#why) are `fossil ticket` traps that report success, so an agent that falls into one never finds out.  Weaker models hit them constantly, but `tkt` keeps mechanics in code, and things work as expected or fails with a message that names the fix.  After the fail-silent traps are gone, the judgement that's left is promptable.
 
 <a id="agent-rules"></a>
+
 ### Rules for Agents
 
 - Pass bodies on stdin, never as arguments, so quoting cannot mangle them.
@@ -347,34 +412,28 @@ Most of the things in [Why](#why) are `fossil ticket` traps that report success,
 - Leave `tkt run` and `tkt init --adopt` to the human.
 
 <a id="skill"></a>
+
 ### Claude Code Skill
 
-See [skills/tkt/SKILL.md](skills/tkt/SKILL.md), which teaches Claude Code how to use `tkt`.  It covers the basics above, plus preferred ticket structure, when to rewrite versus comment, when a ticket may be closed, and how to start the web ui if needed.  The skill ships inside `tkt`, so installing it needs no clone and no second download:
+See [skills/tkt/SKILL.md](skills/tkt/SKILL.md), teaching Claude Code how to use `tkt`.  It covers the basics above, plus preferred ticket structure, when to rewrite versus comment, when a ticket may be closed, and how to start the web ui if needed.  The skill ships inside `tkt`, so installing it needs no clone and no second download:
 
-1. Install `tkt` as in [Install](#install), then confirm it runs:
-
-   ```bash
-   tkt version
-   ```
-
-2. Install the skill for every project, or with `--project` for the current one only:
-
-   ```bash
-   tkt skill install
-   tkt skill install --project
-   ```
-
-   The first writes `~/.claude/skills/tkt/SKILL.md` (under `$CLAUDE_CONFIG_DIR` when that is set). The second writes `.claude/skills/tkt/SKILL.md` at the git root, or in the current directory outside git. Rerun it after upgrading `tkt` to pick up a newer skill.
-
-3. Start a new Claude Code session, so it loads the skill.
-
-With no arguments, `tkt skill` prints the skill instead of installing it. Working from a clone, link the skill directory instead, and `tkt skill install` will refuse to overwrite the link:
+Install `tkt` as in [Install](#install), then confirm it runs:
 
 ```bash
-ln -s ~/code/tkt/skills/tkt ~/.claude/skills/tkt
+# check if tkt is available
+tkt version
+
+# global install to ~/.claude
+tkt skill install
+
+# automatic on `tkt init` if the folder already has .claude/ folder
+tkt skill install --project
 ```
 
+Start a new Claude Code session, so it loads the skill.
+
 <a id="pi-skill"></a>
+
 ### Pi Skill
 
 The skill follows the [Agent Skills](https://agentskills.io) format, so [pi](https://pi.dev) (or others) can use the same install. 
@@ -403,15 +462,6 @@ For a `--project` install, use `{ "skills": ["../.claude/skills"] }` in `.pi/set
 | `make docs.test` | Run the header tool's tests in `docs/tools`, after `init` |
 | `make docs.serve` | Preview the README as github.com renders it at `http://localhost:6419/`; needs `gh` |
 
-A section header is a pair of marker comments that `make docs.headers` fills in with a title and a row of link buttons:
-
-```markdown
-<!-- header usage "Usage" | Tour #tour | Verbs #verbs -->
-<!-- /header -->
-```
-
-Edit the opening marker, never the html between the markers. Run `python3 docs/tools/mdheaders.py --help` for the full syntax.
-
 The suite drives the script's command-line interface against throwaway trackers, and needs `fossil` on your `PATH`. Set `TKT_BASH` to run the script under a specific bash, for example the macOS system shell:
 
 ```bash
@@ -421,3 +471,31 @@ TKT_BASH=/bin/bash make test
 The GitHub workflow in `.github/workflows/test.yml` runs the same targets on Linux and macOS.
 
 The skill lives in two places: `skills/tkt/SKILL.md`, and a copy inside `tkt` that `tkt skill` prints. Edit `skills/tkt/SKILL.md`, then run `make skill` to update the copy. `make test` fails when they differ.
+
+<!-- header why "Why" | The Big One #the-big-one | The Other Ones #the-other-ones -->
+<h2><a id="why"></a>Why<a href="#the-other-ones"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.why.1.dark.svg"><img align=right src="docs/img/hdr/readme.why.1.svg" alt="The Other Ones"></picture></a><a href="#the-big-one"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.why.0.dark.svg"><img align=right src="docs/img/hdr/readme.why.0.svg" alt="The Big One"></picture></a><br clear="all"></h2>
+<!-- /header -->
+
+Fossil isn't buggy, but it's weird, and more like a framework than a solution.  (See also the [upstream docs](https://fossil-scm.org/home/doc/trunk/www/bugtheory.wiki) for more details.) Fossil *is* however very flexible, so that even a humble script like `tkt` can use it as a backend and present a different model.  Here's the stuff we're trying to work-around.
+
+<a id="the-big-one"></a>
+
+### The Big One
+
+By default, actual ticket-status in fossil is buried in an append-only log.  The `New Ticket` form saves the problem statement as the ticket's first comment.  Major corrections to the ticket's actual *spec* later  appear as basically more comments.  Current status shouldn't mean replaying / reconciling a log-stream, who knows what `shun` is supposed to mean!? =P 
+
+Instead, `tkt` adds a `description` field that is replaced in place. Running `tkt edit` rewrites it, comments stay append-only beside it, and every earlier version of the description stays in fossil's change history. Nothing is shunned, and a ticket always reads as its current statement.
+
+<a id="the-other-ones"></a>
+
+### The Other Ones
+
+<table>
+<tr><th width="50%">Fossil</th><th width="50%"><code>tkt</code></th></tr>
+<tr><td>No tags, and no dependencies between tickets</td><td>Adds <code>tags</code> and <code>blockers</code> fields. <code>tkt block</code> checks each id as it is written, <code>tkt show</code> derives what a ticket blocks, and prose references come from fossil's own backlink index</td></tr>
+<tr><td>No command shows one ticket: <code>fossil ticket show</code> dumps a whole report as tab-separated text</td><td>The <code>tkt show</code>, <code>list</code>, and <code>search</code> verbs print markdown, cross-references included</td></tr>
+<tr><td>The <code>fossil ticket</code> command line fails silently: a missing <code>mimetype</code> renders the body as plain text, an empty value is dropped so clearing does nothing, a one-word value such as <code>-q</code> is taken as a fossil option, and one <code>+</code> character separates append from replace</td><td>Every verb sets the mimetype, clears by writing a space, refuses option-like values before calling fossil, and chooses append or replace itself</td></tr>
+<tr><td>The web ui is a whole version-control site: timeline, files, wiki, and bug tracker.  Many UX issues with the tracker, regardless of theme.</td><td>Tracker only. Landing page is tickets, menu is trimmed, many improvements for skin and UX, including syntax highlighting. Ticket detail page is *normal*, with Close/Reopen/Edit/Tags.</td></tr>
+<tr><td>The <code>fossil server</code> command listens on every network interface</td><td>Only localhost is served, one server per tracker, and a new <code>serve</code> takes over from the old one</td></tr>
+<tr><td>Installing a custom ticket setup rewrites whichever repository it is pointed at</td><td>The <code>init</code> verb refuses a repository that is not already a tkt tracker, unless given <code>--adopt</code></td></tr>
+</table> 

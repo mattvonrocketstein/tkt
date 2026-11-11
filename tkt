@@ -6,7 +6,7 @@ set -eo pipefail
 TKT_VERSION=0.1.0
 FIELDS='tags blockers parent description'
 GUEST=hjr
-MENU="{Recent Activity} /rptview?title=Recent+Activity r {} Reports /ticket r {} Login /login !L desktoponly"
+MENU="Reports /ticket r {} {Project Wiki} /rptview?title=Wiki+Pages j {} Login /login !L desktoponly"
 COLS="substr(tkt_uuid,1,10) || ' | ' || coalesce(nullif(status,''),'-') || ' | ' || coalesce(nullif(severity,''),'-') || ' | ' || coalesce(nullif(trim(tags),''),'-') || ' | ' || coalesce(nullif(title,''),'(untitled)')"
 
 # color only on a terminal, and never when either no-color variable is set or the terminal is dumb
@@ -17,6 +17,36 @@ if colorful 1; then PAINT=1; fi
 die() { printf '%stkt:%s %s\n' "$E_RED" "$E_OFF" "$*" >&2; exit 1; }
 
 note() { printf '%stkt:%s %s\n' "$E_DIM" "$E_OFF" "$*" >&2; }
+
+# on a terminal, help shows each command's verbs in bold and its placeholders in cyan, with the env variables
+# the descriptions mention in yellow; the first line is bold. piped, it is plain text
+paint_help() {
+  if [ -z "$PAINT" ]; then cat; return; fi
+  awk -v b=$'\033[1m' -v c=$'\033[36m' -v y=$'\033[33m' -v d=$'\033[2m' -v o=$'\033[0m' '
+    function envs(s) { gsub(/\$?TKT_[A-Z_]+(=[0-9]+)?|\$(EDITOR|TKT_DB)/, y "&" o, s); return s }
+    # one argument token: alternatives split on |, each placeholder or option in cyan, literal words plain.
+    # depth carries an open [ or < across the spaces inside it, as in [-f FMT] or <fossil args...>
+    function arg(t,   n, p, i, r, open) {
+      open = depth > 0
+      depth += gsub(/[\[<]/, "&", t) - gsub(/[\]>]/, "&", t)
+      if (open) return c t o
+      n = split(t, p, "|"); r = ""
+      for (i = 1; i <= n; i++) r = r (i > 1 ? d "|" o : "") (p[i] ~ /^[<\[]|^-/ ? c p[i] o : p[i])
+      return r
+    }
+    NR == 1 { print b $0 o; next }
+    /^  tkt / {
+      line = substr($0, 3)
+      if (match(line, /  +/)) { cmd = substr(line, 1, RSTART - 1); rest = substr(line, RSTART) } else { cmd = line; rest = "" }
+      n = split(cmd, t, " "); out = ""; verbs = 1; depth = 0
+      for (i = 1; i <= n; i++) {
+        if (verbs && t[i] !~ /^[a-z]+$/) verbs = 0
+        out = out (i > 1 ? " " : "") (verbs ? b t[i] o : arg(t[i]))
+      }
+      print "  " out envs(rest); next
+    }
+    { print envs($0) }'
+}
 
 # on a terminal, highlight ids, status, and severity in rows, and headings in a shown ticket
 paint() {
@@ -53,10 +83,25 @@ tkt: a ticket tracker over fossil, with a mutable body.
   tkt close <id> [resolution=...]       close, stdin is the closing comment
   tkt clean [--force]                   purge closed tickets, asking first unless forced
   tkt serve [port=...]                  web ui in the foreground, replacing any running one; opens a browser on a terminal, TKT_OPEN=0 to skip.
-                                        code fences are highlighted by prism from cdnjs, TKT_HIGHLIGHT=0 to leave it out
+                                        project actions show as buttons on each ticket and at /ext/tkt;
+                                        code fences are highlighted by prism, TKT_HIGHLIGHT=0 to leave it out;
+                                        ```mermaid fences draw as diagrams on pages that have one, TKT_MERMAID=0 to leave it out.
+                                        init stores both in the tracker for offline use, else pages load them from cdnjs
   tkt stop                              stop the server started by serve
   tkt status                            print the server url and pid, or fail
   tkt sql <query> | --schema            read-only sql, as markdown; stdin works too
+  tkt wiki ls [prefix]                  wiki pages as markdown, optionally only those under prefix/; alias list
+  tkt wiki get <page>                   a page's markdown; its version goes to stderr; alias show
+  tkt wiki put <page> [--base <v>]      create or replace a page from stdin or $EDITOR; --base refuses if it changed
+  tkt wiki rm <page> [--base <v>]       retire a page, keeping its history
+  tkt wiki cp <template> <new-page>     start a page from a template; other sources need --force; alias copy
+                                        agents/ pages need --force to write, since humans own them
+  tkt action list                       project actions, from the actions key of .tkt.json beside the tracker;
+                                        // comment lines are allowed; tkt init writes a default; needs jq
+  tkt action run <name> [<id>]          run one as its web button does, streaming its log; exits with its code.
+                                        an action whose command uses {ticket} needs an id; for any other, the id
+                                        only names the ticket a comment action posts to
+  tkt action clean [--keep <n>]         retire all but the newest n finished jobs (default 20) to $TMPDIR/tkt-jobs
   tkt skill [install [--project]]       print or install the Claude Code skill
   tkt run <fossil args...>              any fossil command against the tracker
   tkt help | version
@@ -101,6 +146,8 @@ lit() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
 
 need() {
   [ -f "$REPO" ] || die "no tracker at $REPO, run: tkt init"
+  # inside a project action's job, say so: the tkt skill sends an agent's results to the ticket when it reads this
+  if [ -n "${TKT_JOB:-}" ]; then note "running inside project action ${TKT_ACTION:-?}, job $TKT_JOB"; fi
   local have f
   have=" $(sqlq "select group_concat(name,' ') from pragma_table_info('ticket');") "
   for f in $FIELDS; do
@@ -253,6 +300,10 @@ view() {
   cat <<'EOF'
 <th1>
 html "<h2 id=\"ticket-title\">[htmlize $title]</h2>\n"
+# the project actions' button row, fetched from tkt's /ext CGI, since only tkt can read their json. it stays empty
+# when there are none, and when the server has no extroot, as under a plain fossil ui
+html "<div id=\"tkt-actions-row\" data-src=\"$home/ext/tkt/buttons?ticket=[string range $tkt_uuid 0 9]\"></div>\n"
+html "<script nonce=\"$nonce\">(function(){var d=document.getElementById('tkt-actions-row');fetch(d.dataset.src).then(function(r){return r.ok?r.text():''}).then(function(t){d.innerHTML=t},function(){})})()</script>\n"
 </th1>
 <th1>
 # each row shows only when it has a value, so a sparse ticket stays short
@@ -510,23 +561,124 @@ github_branch() {
 # the skin: fossil's built-in blitz, linked from the header rather than copied, plus a dark theme layered on top.
 # the Dark link in the menu flips a data-theme attribute and remembers it per browser.
 # with a github url, Actions | Issues | Main links follow the theme toggle
-PRISM=https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0
 PRISM_CORE_SRI=sha384-MXybTpajaBV0AkcBaCPT4KIvo0FzoCiWXgcihYsw4FUkEz0Pv3JGV6tk2G8vJtDc
 PRISM_AUTOLOAD_SRI=sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q
 # fossil's own csp plus the prism host, so the autoloader can fetch grammars; $nonce is filled in by fossil per page
 CSP="default-src 'self' data:; script-src 'self' 'nonce-\$nonce' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src * data:"
 
-# syntax highlighting is prism from a cdn, deferred, with no theme: token colors live in the skin css for both themes.
-# it fails quietly offline, and TKT_HIGHLIGHT=0 leaves it out of the header entirely
+# syntax highlighting is prism, deferred, with no theme: token colors live in the skin css for both themes.
+# it loads the stored copy when init could store one, else the cdn, failing quietly offline.
+# TKT_HIGHLIGHT=0 leaves it out of the header entirely
 prism_tags() {
   [ "${TKT_HIGHLIGHT:-1}" != 0 ] || return 0
-  printf '<script nonce="$nonce" src="%s/components/prism-core.min.js" integrity="%s" crossorigin="anonymous" defer></script>\n' "$PRISM" "$PRISM_CORE_SRI"
-  printf '<script nonce="$nonce" src="%s/plugins/autoloader/prism-autoloader.min.js" integrity="%s" crossorigin="anonymous" defer></script>\n' "$PRISM" "$PRISM_AUTOLOAD_SRI"
+  printf '<script nonce="$nonce" src="%s" integrity="%s" crossorigin="anonymous" defer></script>\n' "$(asset_url "$PRISM_PATH/components/prism-core.min.js")" "$PRISM_CORE_SRI"
+  printf '<script nonce="$nonce" src="%s" integrity="%s" crossorigin="anonymous" defer></script>\n' "$(asset_url "$PRISM_PATH/plugins/autoloader/prism-autoloader.min.js")" "$PRISM_AUTOLOAD_SRI"
+}
+
+# mermaid diagrams (mindmaps, flowcharts, ...) from ```mermaid fences, drawn in the browser. fossil's markdown leaves them
+# as <pre><code class=language-mermaid>. prism's deferred scripts run once the document turns interactive and highlight
+# right away, so the blocks are claimed on that readystatechange, which fires before any deferred script runs. mermaid.min.js (~5.5MB, SRI-pinned) is fetched only on pages
+# that have a block, and diagrams are redrawn when the theme flips. TKT_MERMAID=0 leaves it out
+MERMAID_SRI=sha512-CaEn6DWYJ1MM0mFAT9nvJzd3z5gPsXTM7wzprb8wx615WzTnTSrGrbKkZUqe1s24lpW27X4HlIrSFvQm/ykqZA==
+
+# offline copies: init stores the scripts above in the tracker as fossil unversioned files, named by their cdnjs path,
+# and pages load them from $home/uv/ instead of the cdn. the prism autoloader finds grammars beside itself, so the
+# grammars below are stored too; a fence in any other language stays plain. TKT_CDN is where init fetches from
+CDN=https://cdnjs.cloudflare.com/ajax/libs
+PRISM_PATH=prism/1.29.0
+MERMAID_PATH=mermaid/12.3.0/mermaid.min.js
+PRISM_LANGS='markup css clike javascript typescript jsx tsx c cpp csharp java kotlin scala groovy dart go rust swift
+  python ruby php markup-templating perl lua r elixir erlang haskell ocaml zig nix tcl bash shell-session powershell
+  batch sql json yaml toml ini diff markdown docker makefile nginx graphql protobuf hcl regex latex'
+
+# true when the tracker holds a stored copy of this path
+stored() { [ "$(sqlq "select count(*) from unversioned where name=$(lit "$1") and hash is not null;" 2>/dev/null)" = 1 ]; }
+
+# where a page loads an asset from: the stored copy when there is one, else the cdn
+asset_url() { if stored "$1"; then printf '$home/uv/%s' "$1"; else printf '%s/%s' "$CDN" "$1"; fi; }
+
+# the subresource-integrity value of a file, in the hash its pin uses
+sri_of() { printf '%s-%s' "$2" "$(openssl dgst "-$2" -binary "$1" | openssl base64 -A)"; }
+
+# fetch the page scripts into the tracker, so the web ui needs no network. pinned files must match their sri.
+# anything already stored is kept, so a rerun offline changes nothing, and a failure leaves pages on the cdn.
+# /uv/ needs the check-out capability, which tkt serve's --localauth admin login has
+store_assets() {
+  local want=() src=${TKT_CDN:-$CDN} tmp user f sri lang get=() ok=() bad=0 err
+  [ "${TKT_MERMAID:-1}" = 0 ] || want+=("$MERMAID_PATH $MERMAID_SRI")
+  if [ "${TKT_HIGHLIGHT:-1}" != 0 ]; then
+    want+=("$PRISM_PATH/components/prism-core.min.js $PRISM_CORE_SRI" "$PRISM_PATH/plugins/autoloader/prism-autoloader.min.js $PRISM_AUTOLOAD_SRI")
+    for lang in $PRISM_LANGS; do want+=("$PRISM_PATH/components/prism-$lang.min.js"); done
+  fi
+  [ ${#want[@]} -gt 0 ] || return 0
+  tmp=$(mktemp -d)
+  for f in "${want[@]}"; do
+    f=${f%% *}
+    stored "$f" || get+=(-o "$tmp/$f" "$src/$f")
+  done
+  if [ ${#get[@]} = 0 ]; then rm -rf "$tmp"; return 0; fi
+  if ! command -v curl >/dev/null || ! command -v openssl >/dev/null; then
+    rm -rf "$tmp"; note "page scripts: curl and openssl are needed to store them offline; pages load them from cdnjs"; return 0
+  fi
+  note "page scripts: fetching $(( ${#get[@]} / 3 )) from $src for offline use"
+  # one curl for everything not yet stored, in parallel; a file that fails to arrive is simply absent afterwards
+  curl -fsSL --create-dirs --parallel --connect-timeout 10 --max-time 120 "${get[@]}" 2>/dev/null || true
+  for f in "${want[@]}"; do
+    sri=${f#* }; [ "$sri" != "$f" ] || sri=; f=${f%% *}
+    [ -f "$tmp/$f" ] || { stored "$f" || bad=$((bad + 1)); continue; }
+    if [ -n "$sri" ] && [ "$(sri_of "$tmp/$f" "${sri%%-*}" 2>/dev/null)" != "$sri" ]; then
+      note "page scripts: $f does not match its pinned hash, skipped"; bad=$((bad + 1)); continue
+    fi
+    ok+=("$f")
+  done
+  # one add for all of them; each is named by its path under $tmp, which is its cdnjs path
+  if [ ${#ok[@]} -gt 0 ]; then
+    user=$(sqlq "select login from user where cap glob '*s*' order by uid limit 1;")
+    if err=$(cd "$tmp" && fossil uv add "${ok[@]}" -R "$REPO" --user "$user" 2>&1 >/dev/null); then
+      note "page scripts: stored ${#ok[@]} in the tracker"
+    else
+      note "page scripts: could not store them (${err:-fossil uv add failed}); pages load them from cdnjs"
+      bad=$((bad + ${#ok[@]}))
+    fi
+  fi
+  rm -rf "$tmp"
+  [ $bad = 0 ] || note "page scripts: $bad not stored; pages load those from cdnjs until a later tkt init stores them"
+}
+
+mermaid_tags() {
+  [ "${TKT_MERMAID:-1}" != 0 ] || return 0
+  cat <<EOF
+<script nonce="\$nonce">
+document.addEventListener('readystatechange',function claim(){
+  if(document.readyState!=='interactive') return;
+  document.removeEventListener('readystatechange',claim);
+  var h=document.documentElement, nodes=[];
+  document.querySelectorAll('code.language-mermaid').forEach(function(c){
+    var pre=c.parentNode, d=document.createElement('div');
+    d.className='mermaid tkt-mermaid'; d.dataset.src=c.textContent; d.textContent=c.textContent;
+    (pre.tagName==='PRE'?pre:c).replaceWith(d); nodes.push(d);
+  });
+  if(!nodes.length) return;
+  function draw(){
+    nodes.forEach(function(d){ d.removeAttribute('data-processed'); d.textContent=d.dataset.src; });
+    mermaid.initialize({startOnLoad:false,theme:h.getAttribute('data-theme')==='dark'?'dark':'default',securityLevel:'strict'});
+    mermaid.run({nodes:nodes,suppressErrors:true});
+  }
+  var s=document.createElement('script');
+  s.src='$(asset_url "$MERMAID_PATH")'; s.integrity='$MERMAID_SRI'; s.crossOrigin='anonymous';
+  s.onload=function(){
+    draw();
+    new MutationObserver(draw).observe(h,{attributes:true,attributeFilter:['data-theme']});
+  };
+  document.head.appendChild(s);
+});
+</script>
+EOF
 }
 
 skin_header() {
   local gh=${1:-} links= prism
-  prism=$(prism_tags)
+  prism=$(mermaid_tags)$(prism_tags)
   if [ -n "$gh" ]; then
     links="        <li class=\"tkt-github\"><a id=\"tkt-gh\" href=\"$gh\" aria-label=\"GitHub\" aria-haspopup=\"true\"><svg viewBox=\"0 0 16 16\" width=\"16\" height=\"16\" aria-label=\"GitHub\"><path fill=\"currentColor\" d=\"M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z\"/></svg></a><nav id=\"tkt-ghdrop\" class=\"tkt-ghdrop\" title=\"GitHub\"><a href=\"$gh/actions\">Actions</a><a href=\"$gh/issues\">Issues</a><a href=\"$gh/tree/$(github_branch)\">Main</a></nav></li>
 "
@@ -587,6 +739,22 @@ $prism<script nonce="\$nonce">
     function words(c,k){ var v=c.textContent.trim(); return multi[k]?v.split(/\s+/).filter(Boolean):(v?[v]:[]); }
     // the filter bar shows keys and values in title case, underscores as spaces; the hash keeps the stored values
     function tc(s){ return s.replace(/_/g,' ').replace(/(^|\s)([a-z])/g,function(m,p,c){ return p+c.toUpperCase(); }); }
+    // the wiki pages report: a page name is a breadcrumb on its slashes. the last part links to the page, each earlier
+    // part is a facet that filters the report to pages under that prefix. fossil's wiki event comments carry a leading
+    // +, :, or - for new, changed, and emptied pages; the report drops the emptied ones and strips the mark
+    var pi=heads.indexOf('page');
+    if(pi>=0) rows.forEach(function(r){
+      var c=r.cells[pi]; if(!c||c.querySelector('a')) return;
+      var n=c.textContent.trim(), ps=n.split('/'); c.textContent=''; c.className='tkt-crumbs';
+      ps.forEach(function(p,j){
+        var a=document.createElement('a'), path=ps.slice(0,j+1).join('/');
+        if(j<ps.length-1){
+          a.className='tkt-facet'; a.setAttribute('data-k','prefix'); a.setAttribute('data-v',path); a.href='#'; a.title='pages under '+path+'/';
+        } else a.href='wiki?name='+encodeURIComponent(n).replace(/%2F/g,'/').replace(/%20/g,'+');
+        a.textContent=p; c.appendChild(a);
+        if(j<ps.length-1){ var sep=document.createElement('span'); sep.className='tkt-crumb-sep'; sep.textContent='/'; c.appendChild(sep); }
+      });
+    });
     // blocked by holds one 'id title' line per blocker; each becomes a link to that ticket
     var bi=heads.indexOf('blocked by');
     if(bi>=0) rows.forEach(function(r){
@@ -614,7 +782,9 @@ $prism<script nonce="\$nonce">
       var f=parse(), ks=Object.keys(f);
       rows.forEach(function(r){
         // a tags filter of several words, as the ticket view's similar-tickets link sends, matches any of them
-        var ok=ks.every(function(k){ var i=heads.indexOf(k); if(i<0||!r.cells[i]) return false; var ws=words(r.cells[i],k);
+        var ok=ks.every(function(k){
+          if(k==='prefix'&&pi>=0) return !!r.cells[pi]&&r.cells[pi].textContent.trim().indexOf(f[k]+'/')===0;
+          var i=heads.indexOf(k); if(i<0||!r.cells[i]) return false; var ws=words(r.cells[i],k);
           return (multi[k]?f[k].split(/\s+/):[f[k]]).some(function(v){ return ws.indexOf(v)>=0; }); });
         r.classList.toggle('tkt-hide',!ok);
       });
@@ -652,6 +822,25 @@ $prism<script nonce="\$nonce">
       li.appendChild(a); th.parentNode.insertBefore(li,th.nextSibling); bs.push({a:a,name:d[0]});
     });
     tips();
+  }
+  // the menu icons in groups, left to right: tickets, wiki, actions, view, site, with a thin rule between groups. entries
+  // are matched by their labels; one not listed, such as a menu entry added under Admin, joins the wiki group.
+  // the ul becomes a flex row in dom order, so without this script the icons keep their floated order
+  function menuGroups(){
+    var ul=document.querySelector('.mainmenu ul'); if(!ul) return;
+    var G=[['New Ticket','Reports'],['New Wiki Page','Project Wiki'],['Add Action','Project Actions'],['Zoom out','Zoom in','Page Reload','Toggle dark mode'],['GitHub','Fossil Site Map','Login']];
+    var lis=[].slice.call(ul.children), groups=G.map(function(){ return []; });
+    lis.forEach(function(li){
+      var a=li.querySelector('a'), l=a&&a.getAttribute('aria-label')||'', g=1;
+      G.forEach(function(names,i){ names.forEach(function(n){ if(l.indexOf(n)===0) g=i; }); });
+      groups[g].push({li:li,rank:G[g].indexOf(G[g].filter(function(n){ return l.indexOf(n)===0; })[0])});
+    });
+    ul.classList.add('tkt-grouped');
+    groups.filter(function(g){ return g.length; }).forEach(function(g,i){
+      g.sort(function(x,y){ return (x.rank<0?99:x.rank)-(y.rank<0?99:y.rank); });
+      if(i){ var sep=document.createElement('li'); sep.className='tkt-menusep'; sep.setAttribute('aria-hidden','true'); ul.appendChild(sep); }
+      g.forEach(function(x){ ul.appendChild(x.li); });
+    });
   }
   // report pages: the table and its filter bar go into a card titled with the report name, with the ticket view's card controls.
   // rows are uncolored, so a color key (fossil's own reports still have one) is dropped
@@ -725,11 +914,26 @@ $prism<script nonce="\$nonce">
     // hidden, and the exact time is the hover hint
     var heads=[].map.call(t.tHead?t.tHead.rows[0].cells:[],function(h){ return h.textContent.trim().toLowerCase(); });
     heads.forEach(function(h,i){
-      if(h!=='mtime'&&h!=='closed') return;
+      // sizes read as '1.2 KB'; the byte count stays first in the cell, hidden and zero-padded, so the column sorts by size
+      if(h==='size'){
+        [].forEach.call(t.tBodies[0].rows,function(r){
+          var c=r.cells[i], b=c&&parseInt(c.textContent,10); if(!c||isNaN(b)) return;
+          c.innerHTML='<span hidden>'+('000000000'+b).slice(-10)+'</span>'+(b<1024?b+' B':(b/1024).toFixed(1)+' KB');
+        });
+        return;
+      }
+      if(h!=='mtime'&&h!=='closed'&&h!=='created') return;
       [].forEach.call(t.tBodies[0].rows,function(r){
         var c=r.cells[i], s=c&&c.textContent.trim(), d=s&&new Date(s.replace(' ','T')+'Z'); if(!d||isNaN(d)) return;
         c.innerHTML='<span hidden>'+s+'</span><span class="tkt-ago" aria-label="'+s+' UTC">'+ago(d)+'</span>';
       });
+    });
+    // in a report that mixes open and closed tickets, a closed ticket's row is dimmed and its id and title struck through
+    var si=heads.indexOf('status');
+    if(si>=0) [].forEach.call(t.tBodies[0].rows,function(r){
+      if(!r.cells[si]||r.cells[si].textContent.trim()!=='Closed') return;
+      r.classList.add('tkt-closedrow');
+      ['#','title'].forEach(function(k){ var i=heads.indexOf(k); if(i>=0&&r.cells[i]) r.cells[i].classList.add('tkt-closed'); });
     });
     // column headers in title case. the sql names stay lowercase, since fossil links a column named '#' and the facet filter
     // matches on the lowercase names, which it read before this runs
@@ -753,11 +957,50 @@ $prism<script nonce="\$nonce">
   // the ticket view's actions all live on the page itself, so its submenu is hidden; so is any submenu whose links are all hidden
   function bareSubmenu(){
     var m=document.querySelector('.submenu'); if(!m) return;
+    // the wiki list keeps fossil's new-page link (the ticket copy is hidden in css), named for what it makes
+    var wn=document.body.classList.contains('cpage-wcontent')&&m.querySelector('a.sml-new');
+    if(wn){ wn.textContent='New Page'; wn.classList.add('tkt-wikinew'); }
+    // the wiki pages report stands in for fossil's page list, so it carries that list's new-page link too
+    if(/\/rptview/.test(location.pathname)&&/^Wiki Pages$/.test(document.title.replace(/^[^:]*:\s*/,''))&&!m.querySelector('a.tkt-wikinew')){
+      var np=document.createElement('a'); np.className='label tkt-wikinew'; np.textContent='New Page';
+      np.href=location.pathname.replace(/\/rptview$/,'/wikinew'); m.appendChild(np);
+    }
+    // a wiki page's submenu leads back to the page list
+    if(document.body.classList.contains('cpage-wiki')&&!m.querySelector('a.tkt-wikiall')){
+      var all=document.createElement('a'); all.className='label tkt-wikiall'; all.textContent='All Pages';
+      all.href=(m.querySelector('a.sml-help')||{href:'/wikihelp'}).href.replace(/\/(wikihelp|wiki\?.*)$/,'/rptview?title=Wiki+Pages');
+      m.insertBefore(all,m.firstChild);
+    }
+    // fossil's wiki help knows nothing of tkt's diagrams and highlighting, so Help goes to tkt's formatting guide, which links back to it
+    [].forEach.call(m.querySelectorAll('a[href$="/wikihelp"]'),function(h){ h.href=h.href.replace(/\/wikihelp$/,'/wiki?name=agents/FormattingHelp'); });
     var shown=[].some.call(m.children,function(c){ return getComputedStyle(c).display!=='none'; });
     if(document.querySelector('.tkt-card-fields')||!shown) m.classList.add('tkt-bare');
   }
+  // page reload, a menu toggle left of the theme toggle: a page that follows something live, such as a running job,
+  // carries a tkt-reload meta naming its period in seconds, and reloads that often while the toggle is on. the choice
+  // is kept per browser; on shows the refresh icon, off the refresh-alert one, since the page may be going stale
+  function reloadToggle(){
+    var th=document.querySelector('.mainmenu li.tkt-themeli'); if(!th) return;
+    var rk='tkt-reload', on=true, timer=null, meta=document.querySelector('meta[name="tkt-reload"]');
+    try { on=localStorage.getItem(rk)!=='off'; } catch(e){}
+    var arrows='<path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/>';
+    var alert='<path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/><path d="M12 9l0 3"/><path d="M12 15l.01 0"/>';
+    var li=document.createElement('li'), a=document.createElement('a');
+    li.className='tkt-menuicon tkt-reloadli'; a.href='#';
+    function draw(){
+      a.innerHTML='<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(on?arrows:alert)+'</svg>';
+      a.setAttribute('aria-label','Page Reload: '+(on?'On':'Off'));
+      clearTimeout(timer); timer=null;
+      if(on&&meta){ var s=parseFloat(meta.getAttribute('content'))||2; timer=setTimeout(function(){ location.reload(); },s*1000); }
+    }
+    a.addEventListener('click',function(e){ e.preventDefault(); on=!on; try { localStorage.setItem(rk,on?'on':'off'); } catch(e){} draw(); });
+    draw();
+    li.appendChild(a); th.parentNode.insertBefore(li,th.nextSibling);
+  }
   document.addEventListener('DOMContentLoaded',function(){
     zoomButtons();
+    reloadToggle();
+    menuGroups();
     bareSubmenu();
     reportCard();
     attachCard();
@@ -797,7 +1040,7 @@ $prism<script nonce="\$nonce">
     <nav class="mainmenu" title="Main Menu">
       <ul>
         <th1>
-          html "<li class='tkt-hb'><a id='hbbtn' href='\$home/sitemap' aria-label='Site Map'><svg class='tkt-fossil' viewBox='0 0 24 24' width='18' height='18' fill='currentColor' aria-hidden='true'><path d='M12.571 0c-.699.022-2.041.555-3.458 1.419C7.464 2.42 6.258 3.538 6.16 4.108c-.008.009-.019.014-.026.023-.563.746.203 2.277 1.711 3.414 1.408 1.063 2.958 1.397 3.617.832.518-.09 1.227-1.776 1.627-3.94.383-2.054.35-3.812-.045-4.214-.006-.02.001-.048-.01-.066-.069-.113-.23-.163-.463-.156zm-2.277 2.936c-.164.193-.329.383-.492.605-.217.296-.403.587-.568.866a5.705 5.705 0 00-.908-.432 14.052 14.052 0 001.785-.914c.067-.04.118-.084.183-.125zm.912 1.084c-.004.024-.01.043-.015.066a16.33 16.33 0 00-.227 1.78 6.106 6.106 0 00-.654-.674c.215-.241.436-.507.652-.801.093-.127.16-.246.244-.371zm-3.14 4.002c-.41-.075-.968 1.14-1.246 2.706-.276 1.566-.164 2.897.246 2.969.41.072.972-1.141 1.248-2.707.276-1.566.164-2.896-.248-2.968zm-5.56 2.708c-.072.032-.026.314.103.625.132.312.297.539.37.51.074-.031.025-.311-.104-.623-.13-.312-.295-.54-.37-.512zm-.602.506c-.035-.005-.061 0-.076.018-.062.067.083.298.322.512.24.215.483.332.545.265.06-.07-.084-.298-.324-.513-.18-.16-.361-.267-.467-.282zm-.224.684c-.118 0-.197.02-.205.058-.017.077.247.205.587.282.343.078.636.078.653.002.017-.08-.248-.204-.588-.284a2.163 2.163 0 00-.447-.058zm1.296.144c-.251.067-.235.954.036 1.98.27 1.03.695 1.81.945 1.745.25-.067.234-.954-.037-1.98-.271-1.03-.694-1.812-.944-1.745zm10.394.186c-.072-.031-.237.198-.369.51-.13.311-.178.59-.103.62.072.032.24-.197.369-.51.13-.31.178-.591.103-.62zm.61.504c-.105.015-.285.12-.463.281-.238.213-.382.445-.323.512.058.064.304-.057.541-.27.238-.213.38-.443.32-.508-.014-.016-.04-.02-.075-.015zm-7.625.593c-.34.035-.86.369-1.326.883-.621.686-.914 1.437-.652 1.672.261.237.978-.125 1.601-.81.621-.689.912-1.437.65-1.674-.065-.059-.16-.082-.273-.07zm7.85.092c-.119 0-.276.018-.446.057-.343.077-.607.202-.59.281.017.077.31.077.652 0 .34-.077.607-.202.588-.28-.008-.037-.087-.057-.205-.058zm-6.13.168a.15.15 0 00-.099.028c-.21.163.143.978.793 1.82.647.841 1.346 1.393 1.557 1.23.21-.16-.148-.977-.795-1.818-.567-.737-1.172-1.251-1.455-1.26zm4.557.043c-.267-.03-.843.36-1.387.96-.62.685-.966 1.386-.767 1.563.196.18.861-.232 1.482-.917.621-.686.964-1.385.768-1.565a.17.17 0 00-.096-.04zm-5.603.133c-.386.082-.48 1.2-.205 2.492.273 1.292.815 2.275 1.2 2.193.387-.081.481-1.2.208-2.49-.276-1.292-.815-2.279-1.203-2.195zm15.448 2.459c-.13-.055-.48.471-.78 1.174-.297.705-.432 1.323-.3 1.378.13.056.48-.47.777-1.173.297-.705.433-1.324.303-1.38zm-9.503.412c-.07.031-.024.31.105.621.132.312.298.542.367.514.072-.031.027-.31-.105-.621-.13-.312-.295-.543-.367-.514zm-.6.506c-.035-.005-.062 0-.078.017-.06.07.087.297.324.51.238.213.481.33.541.264.06-.067-.083-.297-.32-.51-.178-.158-.36-.266-.467-.281zm-.224.681c-.118 0-.195.019-.203.057-.017.079.245.204.585.283.343.077.636.077.653 0 .016-.077-.246-.204-.586-.281a2.133 2.133 0 00-.45-.059zm1.37.21c-.26 0-.476.75-.476 1.675s.215 1.676.477 1.676c.26 0 .478-.75.478-1.676 0-.926-.217-1.676-.478-1.676zm-5.175.333a.235.235 0 00-.133.045c-.294.216.04 1.17.744 2.13.703.962 1.514 1.564 1.807 1.35.295-.215-.035-1.171-.74-2.13-.617-.842-1.315-1.41-1.678-1.395zm13.02.522c-.105-.094-.601.297-1.105.873-.503.575-.824 1.119-.718 1.213.108.093.603-.298 1.107-.873.504-.576.825-1.12.717-1.213zm-11.014.443c-.113-.005-.194.019-.23.074-.144.223.46.875 1.353 1.453.89.58 1.73.872 1.875.649.146-.223-.46-.877-1.35-1.457-.667-.434-1.308-.704-1.648-.719zM8.73 20.451c-.266 0-.48.75-.48 1.675 0 .926.214 1.676.48 1.676s.482-.75.482-1.676c0-.925-.216-1.675-.482-1.675zm-3.644.06c-.072.031-.026.313.103.625.132.312.297.539.37.51.074-.031.025-.312-.104-.623-.13-.312-.295-.54-.37-.512zm14.296.477c-.368-.04-1.127.127-1.96.453-1.107.434-1.929.984-1.833 1.228.096.242 1.074.093 2.181-.342 1.11-.434 1.932-.985 1.836-1.23-.024-.06-.102-.096-.224-.11zm-14.898.029c-.035-.005-.061 0-.076.018-.062.067.082.298.322.511.24.216.483.333.545.266.06-.07-.084-.298-.324-.514-.18-.16-.362-.267-.467-.281zm-.223.685c-.118 0-.196.019-.205.057-.016.08.248.204.588.283.343.077.636.077.653 0 .016-.077-.248-.204-.588-.281a2.116 2.116 0 00-.448-.059zm1.29.047c-.114-.005-.194.019-.231.075-.144.223.461.875 1.353 1.453.89.58 1.731.871 1.875.648.147-.223-.46-.877-1.35-1.457-.666-.433-1.307-.704-1.648-.719zm6.628.09c-.865-.036-1.493.081-1.527.32-.046.317.98.73 2.289.92 1.311.19 2.415.087 2.46-.232.046-.317-.98-.73-2.292-.92a9.203 9.203 0 00-.93-.088z'/></svg></a></li>\\n"
+          html "<li class='tkt-hb'><a id='hbbtn' href='\$home/sitemap' aria-label='Fossil Site Map'><svg class='tkt-fossil' viewBox='0 0 24 24' width='18' height='18' fill='currentColor' aria-hidden='true'><path d='M12.571 0c-.699.022-2.041.555-3.458 1.419C7.464 2.42 6.258 3.538 6.16 4.108c-.008.009-.019.014-.026.023-.563.746.203 2.277 1.711 3.414 1.408 1.063 2.958 1.397 3.617.832.518-.09 1.227-1.776 1.627-3.94.383-2.054.35-3.812-.045-4.214-.006-.02.001-.048-.01-.066-.069-.113-.23-.163-.463-.156zm-2.277 2.936c-.164.193-.329.383-.492.605-.217.296-.403.587-.568.866a5.705 5.705 0 00-.908-.432 14.052 14.052 0 001.785-.914c.067-.04.118-.084.183-.125zm.912 1.084c-.004.024-.01.043-.015.066a16.33 16.33 0 00-.227 1.78 6.106 6.106 0 00-.654-.674c.215-.241.436-.507.652-.801.093-.127.16-.246.244-.371zm-3.14 4.002c-.41-.075-.968 1.14-1.246 2.706-.276 1.566-.164 2.897.246 2.969.41.072.972-1.141 1.248-2.707.276-1.566.164-2.896-.248-2.968zm-5.56 2.708c-.072.032-.026.314.103.625.132.312.297.539.37.51.074-.031.025-.311-.104-.623-.13-.312-.295-.54-.37-.512zm-.602.506c-.035-.005-.061 0-.076.018-.062.067.083.298.322.512.24.215.483.332.545.265.06-.07-.084-.298-.324-.513-.18-.16-.361-.267-.467-.282zm-.224.684c-.118 0-.197.02-.205.058-.017.077.247.205.587.282.343.078.636.078.653.002.017-.08-.248-.204-.588-.284a2.163 2.163 0 00-.447-.058zm1.296.144c-.251.067-.235.954.036 1.98.27 1.03.695 1.81.945 1.745.25-.067.234-.954-.037-1.98-.271-1.03-.694-1.812-.944-1.745zm10.394.186c-.072-.031-.237.198-.369.51-.13.311-.178.59-.103.62.072.032.24-.197.369-.51.13-.31.178-.591.103-.62zm.61.504c-.105.015-.285.12-.463.281-.238.213-.382.445-.323.512.058.064.304-.057.541-.27.238-.213.38-.443.32-.508-.014-.016-.04-.02-.075-.015zm-7.625.593c-.34.035-.86.369-1.326.883-.621.686-.914 1.437-.652 1.672.261.237.978-.125 1.601-.81.621-.689.912-1.437.65-1.674-.065-.059-.16-.082-.273-.07zm7.85.092c-.119 0-.276.018-.446.057-.343.077-.607.202-.59.281.017.077.31.077.652 0 .34-.077.607-.202.588-.28-.008-.037-.087-.057-.205-.058zm-6.13.168a.15.15 0 00-.099.028c-.21.163.143.978.793 1.82.647.841 1.346 1.393 1.557 1.23.21-.16-.148-.977-.795-1.818-.567-.737-1.172-1.251-1.455-1.26zm4.557.043c-.267-.03-.843.36-1.387.96-.62.685-.966 1.386-.767 1.563.196.18.861-.232 1.482-.917.621-.686.964-1.385.768-1.565a.17.17 0 00-.096-.04zm-5.603.133c-.386.082-.48 1.2-.205 2.492.273 1.292.815 2.275 1.2 2.193.387-.081.481-1.2.208-2.49-.276-1.292-.815-2.279-1.203-2.195zm15.448 2.459c-.13-.055-.48.471-.78 1.174-.297.705-.432 1.323-.3 1.378.13.056.48-.47.777-1.173.297-.705.433-1.324.303-1.38zm-9.503.412c-.07.031-.024.31.105.621.132.312.298.542.367.514.072-.031.027-.31-.105-.621-.13-.312-.295-.543-.367-.514zm-.6.506c-.035-.005-.062 0-.078.017-.06.07.087.297.324.51.238.213.481.33.541.264.06-.067-.083-.297-.32-.51-.178-.158-.36-.266-.467-.281zm-.224.681c-.118 0-.195.019-.203.057-.017.079.245.204.585.283.343.077.636.077.653 0 .016-.077-.246-.204-.586-.281a2.133 2.133 0 00-.45-.059zm1.37.21c-.26 0-.476.75-.476 1.675s.215 1.676.477 1.676c.26 0 .478-.75.478-1.676 0-.926-.217-1.676-.478-1.676zm-5.175.333a.235.235 0 00-.133.045c-.294.216.04 1.17.744 2.13.703.962 1.514 1.564 1.807 1.35.295-.215-.035-1.171-.74-2.13-.617-.842-1.315-1.41-1.678-1.395zm13.02.522c-.105-.094-.601.297-1.105.873-.503.575-.824 1.119-.718 1.213.108.093.603-.298 1.107-.873.504-.576.825-1.12.717-1.213zm-11.014.443c-.113-.005-.194.019-.23.074-.144.223.46.875 1.353 1.453.89.58 1.73.872 1.875.649.146-.223-.46-.877-1.35-1.457-.667-.434-1.308-.704-1.648-.719zM8.73 20.451c-.266 0-.48.75-.48 1.675 0 .926.214 1.676.48 1.676s.482-.75.482-1.676c0-.925-.216-1.675-.482-1.675zm-3.644.06c-.072.031-.026.313.103.625.132.312.297.539.37.51.074-.031.025-.312-.104-.623-.13-.312-.295-.54-.37-.512zm14.296.477c-.368-.04-1.127.127-1.96.453-1.107.434-1.929.984-1.833 1.228.096.242 1.074.093 2.181-.342 1.11-.434 1.932-.985 1.836-1.23-.024-.06-.102-.096-.224-.11zm-14.898.029c-.035-.005-.061 0-.076.018-.062.067.082.298.322.511.24.216.483.333.545.266.06-.07-.084-.298-.324-.514-.18-.16-.362-.267-.467-.281zm-.223.685c-.118 0-.196.019-.205.057-.016.08.248.204.588.283.343.077.636.077.653 0 .016-.077-.248-.204-.588-.281a2.116 2.116 0 00-.448-.059zm1.29.047c-.114-.005-.194.019-.231.075-.144.223.461.875 1.353 1.453.89.58 1.731.871 1.875.648.147-.223-.46-.877-1.35-1.457-.666-.433-1.307-.704-1.648-.719zm6.628.09c-.865-.036-1.493.081-1.527.32-.046.317.98.73 2.289.92 1.311.19 2.415.087 2.46-.232.046-.317-.98-.73-2.292-.92a9.203 9.203 0 00-.93-.088z'/></svg></a></li>\\n"
           builtin_request_js hbmenu.js
           # menu entries are collected here and drawn as icon buttons after the others, see below
           set once 1
@@ -809,21 +1052,22 @@ $prism<script nonce="\$nonce">
               set once 0
             }
             if {[string match /* \$url]} {set url \$home\$url}
-            set items "\$items [list [list \$name \$url \$class]]"
+            # the wiki sits right beside the github icon, ahead of the theme toggle, the rest follow it
+            if {\$name eq "Project Wiki"} {
+              set wiki [list [list \$name \$url \$class]]
+            } else {
+              set items "\$items [list [list \$name \$url \$class]]"
+            }
           }
-        </th1>
-$links        <li class="tkt-themeli"><a id="tkt-theme" href="#" aria-label="Toggle dark mode"><svg class="tkt-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Dark"><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/></svg><svg class="tkt-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Light"><path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/></svg></a></li>
-        <th1>
-          # the menu entries as tabler icon buttons, floated right beside the others; floats stack right to left, so they go last-first.
-          # an entry without an icon here keeps its text
+          proc menuicons {items} {
           for {set i [expr {[llength \$items]-1}]} {\$i >= 0} {set i [expr {\$i-1}]} {
             set it [lindex \$items \$i]
             set name [lindex \$it 0]
             set ico ""
             if {\$name eq "Reports"} {
-              set ico {<path d='M8 5h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h5.697'/><path d='M18 14v4h4'/><path d='M18 11v-4a2 2 0 0 0 -2 -2h-2'/><path d='M8 3m0 2a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2z'/><path d='M18 18m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0'/><path d='M8 11h4'/><path d='M8 15h3'/>}
-            } elseif {\$name eq "Recent Activity"} {
-              set ico {<path d='M15 5l0 2'/><path d='M15 11l0 2'/><path d='M15 17l0 2'/><path d='M5 5h14a2 2 0 0 1 2 2v3a2 2 0 0 0 0 4v3a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-3a2 2 0 0 0 0 -4v-3a2 2 0 0 1 2 -2'/>}
+              set ico {<path d='M11.18 20.274l-2.18 .726v-8.5l-4.48 -4.928a2 2 0 0 1 -.52 -1.345v-2.227h16v2.172a2 2 0 0 1 -.586 1.414l-4.414 4.414v3'/><path d='M17.8 20.817l-2.172 1.138a.392 .392 0 0 1 -.568 -.41l.415 -2.411l-1.757 -1.707a.389 .389 0 0 1 .217 -.665l2.428 -.352l1.086 -2.193a.392 .392 0 0 1 .702 0l1.086 2.193l2.428 .352a.39 .39 0 0 1 .217 .665l-1.757 1.707l.414 2.41a.39 .39 0 0 1 -.567 .411l-2.172 -1.138z'/>}
+            } elseif {\$name eq "Project Wiki"} {
+              set ico {<path d='M19.875 6.27a2.225 2.225 0 0 1 1.125 1.948v7.284c0 .809 -.443 1.555 -1.158 1.948l-6.75 4.27a2.269 2.269 0 0 1 -2.184 0l-6.75 -4.27a2.225 2.225 0 0 1 -1.158 -1.948v-7.285c0 -.809 .443 -1.554 1.158 -1.947l6.75 -3.98a2.33 2.33 0 0 1 2.25 0l6.75 3.98h-.033z'/><path d='M9 8l1 8l2 -5l2 5l1 -8'/>}
             } elseif {\$name eq "Login"} {
               set ico {<path d='M15 8v-2a2 2 0 0 0 -2 -2h-7a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2 -2v-2'/><path d='M21 12h-13l3 -3'/><path d='M11 15l-3 -3'/>}
             }
@@ -835,8 +1079,24 @@ $links        <li class="tkt-themeli"><a id="tkt-theme" href="#" aria-label="Tog
             }
             html "</a></li>\\n"
           }
+          }
         </th1>
-        <th1>if {[anycap n]} {html "<li class='tkt-newli'><a href='\$home/tktnew' aria-label='New Ticket'><svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M14 3v4a1 1 0 0 0 1 1h4'/><path d='M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z'/><path d='M12 11l0 6'/><path d='M9 14l6 0'/></svg></a></li>\\n"}</th1>
+$links        <th1>if {[info exists wiki]} {menuicons \$wiki}</th1>
+        <th1>
+          # the actions group: adding one on the wiki page that configures them, and the project actions page, served by tkt's /ext CGI
+          html "<li class='tkt-menuicon actions'><a href='\$home/ext/tkt#config' aria-label='Add Action'><svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M12.483 20.935c-.862 .239 -1.898 -.178 -2.158 -1.252a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c.67 .162 1.08 .65 1.22 1.191'/><path d='M16 19h6'/><path d='M19 16v6'/><path d='M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'/></svg></a></li>\\n"
+          set acls "tkt-menuicon actions"
+          if {[string match ext* \$current_page]} {set acls "active \$acls"}
+          html "<li class='\$acls'><a href='\$home/ext/tkt' aria-label='Project Actions'><svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M13.256 20.473c-.855 .907 -2.583 .643 -2.931 -.79a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c.584 .434 .929 1.02 1.009 1.6'/><path d='M19 16l-2 3h4l-2 3'/><path d='M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'/></svg></a></li>\\n"
+        </th1>
+        <li class="tkt-themeli"><a id="tkt-theme" href="#" aria-label="Toggle dark mode"><svg class="tkt-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Dark"><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/></svg><svg class="tkt-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Light"><path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/></svg></a></li>
+        <th1>
+          # the menu entries as tabler icon buttons, floated right beside the others; floats stack right to left, so they go last-first.
+          # an entry without an icon here keeps its text
+          menuicons \$items
+        </th1>
+        <th1>if {[anycap n]} {html "<li class='tkt-newli'><a href='\$home/tktnew' aria-label='New Ticket'><svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M6.5 7.5a1 1 0 1 0 2 0a1 1 0 1 0 -2 0'/><path d='M12 21l-7.414 -7.414a2 2 0 0 1 -.586 -1.414v-5.172a3 3 0 0 1 3 -3h5.172a2 2 0 0 1 1.414 .586l7.71 7.71a2.41 2.41 0 0 1 .5 2.719'/><path d='M16 19h6'/><path d='M19 16v6'/></svg></a></li>\\n"}</th1>
+        <th1>if {[anycap f]} {html "<li class='tkt-newli'><a href='\$home/wikinew' aria-label='New Wiki Page'><svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M19 10h-14'/><path d='M5 6h14'/><path d='M14 14h-9'/><path d='M5 18h6'/><path d='M18 15v6'/><path d='M15 18h6'/></svg></a></li>\\n"}</th1>
       </ul>
     </nav>
     <nav id="hbdrop" class='hbdrop' title="sitemap"></nav>
@@ -879,8 +1139,11 @@ skin_css() {
 div.container { max-width: none; width: 84%; }
 /* the project name in the logo links to recent activity, but keeps the heading's look */
 header .logo a.tkt-home { color: inherit; text-decoration: none; }
+/* the title row centers its parts on one line, so the smaller page title sits level with the project name rather than on its baseline */
+header .logo h1#page-title { display: inline-flex; align-items: center; }
+header .logo h1#page-title small { line-height: 1; }
 /* a dim, light divider between the project name and the page's subtitle */
-header .logo .tkt-title-sep { display: inline-block; width: 1px; height: .55em; margin: 0 .45em; vertical-align: .05em; overflow: hidden; color: transparent; background-color: #c4cad0; }
+header .logo .tkt-title-sep { display: inline-block; width: 1px; height: .55em; margin: 0 .45em; overflow: hidden; color: transparent; background-color: #c4cad0; }
 html[data-theme=dark] header .logo .tkt-title-sep { background-color: #444c56; }
 /* one header row: the logo on the left, the menu's icons on the right. fossil positions the sitemap dropdown absolutely,
    which in a centered flex row would put its top above the page, so it is pinned to the header's bottom edge instead */
@@ -925,6 +1188,30 @@ html[data-theme=dark] .tkt-jumps a:hover { color: #79b8d6; }
 html[data-theme=dark] .tkt-jumps a[aria-label]:hover::after { color: #1b1f24; background-color: #d4d8de; }
 /* related tickets (blocked by, subtasks): one per line, a small dimmed status mark before the linked title, its status as the hover hint */
 .tkt-subtask + .tkt-subtask { margin-top: 2px; }
+.tkt-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.tkt-actions form { margin: 0; }
+/* the actions pages: the button row sits in its card's padding, the log and jobs table run edge to edge */
+.tkt-card-actions .tkt-card-body { padding: 10px 12px; }
+.tkt-card-actions .tkt-actions { margin: 0; }
+.tkt-card-actions p.tkt-actions-note { margin-top: 8px; color: #6a737d; font-size: .9em; }
+html[data-theme=dark] .tkt-card-actions p.tkt-actions-note { color: #8b949e; }
+.tkt-actions button { display: inline-flex; align-items: center; gap: 6px; }
+.tkt-action-icon { width: 16px; height: 16px; }
+html[data-theme=dark] .tkt-action-icon { filter: invert(1); }
+.tkt-card-actions p, .tkt-jobs-none { margin: 0; padding: 4px 0; }
+.tkt-card-report .tkt-jobs-none { padding: 10px 12px; }
+.tkt-card-log .tkt-card-body { padding: 0; }
+.tkt-card-log pre { margin: 0; padding: 10px 12px; border: 0; border-radius: 0 0 7px 7px; max-height: 70vh; overflow: auto; }
+.tkt-card-meta a { font-weight: normal; }
+.tkt-jobstate { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: .85em; font-weight: 600; line-height: 1.6; }
+.tkt-jobstate-ok { color: #1a7f37; background-color: #dafbe1; }
+.tkt-jobstate-bad { color: #cf222e; background-color: #ffebe9; }
+.tkt-jobstate-run { color: #0969da; background-color: #ddf4ff; }
+.tkt-jobstate-dead { color: #6a737d; background-color: #eceff2; }
+html[data-theme=dark] .tkt-jobstate-ok { color: #3fb950; background-color: #12261e; }
+html[data-theme=dark] .tkt-jobstate-bad { color: #f85149; background-color: #2d1214; }
+html[data-theme=dark] .tkt-jobstate-run { color: #58a6ff; background-color: #121d2f; }
+html[data-theme=dark] .tkt-jobstate-dead { color: #8b949e; background-color: #22272e; }
 .tkt-mark { position: relative; display: inline-flex; vertical-align: -2px; margin-right: 6px; color: #888; opacity: .6; cursor: default; }
 .tkt-mark:hover { opacity: 1; }
 .tkt-mark svg { width: 14px; height: 14px; }
@@ -957,6 +1244,10 @@ html[data-theme=dark] .report td, html[data-theme=dark] .report th { border-bott
 /* clickable facets in report cells filter the table; the current filter shows in a bar above it */
 a.tkt-facet { color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor; }
 a.tkt-facet:hover { border-bottom-style: solid; }
+table.report td.tkt-closed, table.report td.tkt-closed a { text-decoration: line-through; }
+table.report tr.tkt-closedrow { opacity: 0.45; }
+table.report tr.tkt-closedrow:hover { opacity: 0.8; }
+.tkt-crumbs .tkt-crumb-sep { margin: 0 0.3em; opacity: 0.5; }
 /* card: a rounded, labelled box. the ticket view puts its fields, the description, and each comment in one */
 .tkt-card { clear: both; margin: 0 0 1em; border: 1px solid #d8dde2; border-radius: 8px; }
 .tkt-card-label { padding: 6px 12px; border-radius: 7px 7px 0 0; font-size: .85em; font-weight: 600; letter-spacing: .02em; color: #4a5560; background-color: #f3f5f7; border-bottom: 1px solid #d8dde2; }
@@ -1008,6 +1299,7 @@ html[data-theme=dark] .tkt-card-foot { border-top-color: #2a3038; }
 .submenu.tkt-bare { display: none; }
 /* new ticket is a project action, so it lives in the main menu beside github rather than in any submenu (sml-new is the tickets page's copy) */
 .submenu a.sml-new-ticket, .submenu a.sml-new { display: none; }
+.submenu a.sml-new.tkt-wikinew { display: inline-block; }
 .mainmenu li.tkt-newli, .mainmenu li.tkt-menuicon { float: right; position: relative; }
 .mainmenu li.tkt-newli svg, .mainmenu li.tkt-menuicon svg { vertical-align: -0.3em; }
 /* blitz pads each menu link 15px a side, made for words; icons sit closer */
@@ -1050,6 +1342,8 @@ tr.tkt-hide { display: none; }
 .token.important, .token.bold { font-weight: bold; }
 .token.italic { font-style: italic; }
 html[data-theme=dark] pre, html[data-theme=dark] pre.verbatim { border: 1px solid #30363d; }
+/* pikchr draws in black on a transparent ground; in dark, invert it and turn the hues back so colored fills keep their color */
+html[data-theme=dark] svg.pikchr { filter: invert(1) hue-rotate(180deg); }
 html[data-theme=dark] .token.comment, html[data-theme=dark] .token.prolog, html[data-theme=dark] .token.doctype, html[data-theme=dark] .token.cdata { color: #8b949e; }
 html[data-theme=dark] .token.punctuation { color: #a9b1ba; }
 html[data-theme=dark] .token.property, html[data-theme=dark] .token.tag, html[data-theme=dark] .token.constant, html[data-theme=dark] .token.symbol, html[data-theme=dark] .token.deleted { color: #ff7b72; }
@@ -1067,6 +1361,13 @@ html[data-theme=dark] .mainmenu svg.tkt-moon { display: none; }
 /* the fossil mark from simple-icons (cc0), drawn in the link color like the tabler icons beside it */
 .mainmenu svg.tkt-fossil { vertical-align: -0.3em; }
 .mainmenu li.tkt-github { float: right; position: relative; }
+.mainmenu ul.tkt-grouped { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
+/* on a narrow screen the grouped menu may shrink and wrap onto a second row instead of running off the edge */
+header nav.mainmenu:has(ul.tkt-grouped) { flex: 0 1 auto; min-width: 0; }
+.mainmenu ul.tkt-grouped > li { float: none; }
+.mainmenu li.tkt-menusep { width: 1px; height: 18px; margin: 0 6px; padding: 0; background-color: #c4cad0; }
+.mainmenu li.tkt-menusep:hover { background-color: #c4cad0; }
+html[data-theme=dark] .mainmenu li.tkt-menusep, html[data-theme=dark] .mainmenu li.tkt-menusep:hover { background-color: #5c6570; }
 .mainmenu li.tkt-github a#tkt-gh svg { vertical-align: -0.2em; }
 nav.tkt-ghdrop { display: none; position: absolute; right: 0; top: 100%; min-width: 8em; background-color: white; border: 2px solid #ccc; z-index: 20; }
 nav.tkt-ghdrop a { display: block; color: #3b5c6b; padding: 10px 15px; white-space: nowrap; }
@@ -1114,6 +1415,71 @@ html[data-theme=dark] input[type=submit] { background-color: #3d6f8a; border-col
 html[data-theme=dark] .timelineSelected, html[data-theme=dark] .timelineSecondary, html[data-theme=dark] tr.timelineCurrent { background-color: #2a3038; }
 html[data-theme=dark] div.sidebox, html[data-theme=dark] div.divider { background-color: #22272e; color: #d4d8de; border-color: #30363d; }
 html[data-theme=dark] mark { background: #7a6a00; color: #fff; }
+/* /chat: fossil tints each sender's bubble with a pastel inline color meant for light text-on-light; in the dark theme use
+   neutral surfaces instead, with your own messages a shade bluer. the toolbar buttons and the load-older legend follow the theme */
+body.chat fieldset { border: 0; padding: 0; margin: 0 0 .5em; }
+body.chat fieldset legend { font-size: .8em; color: #6a737d; padding: 0 0 .25em; }
+body.chat .message-widget-tab, body.chat .message-widget-content { border-color: rgba(0,0,0,.12); }
+body.chat .cbutton { padding: 2px 8px; cursor: pointer; border-color: #c4cad0; }
+html[data-theme=dark] body.chat fieldset legend { color: #8b949e; }
+html[data-theme=dark] body.chat .message-widget-tab,
+html[data-theme=dark] body.chat .message-widget-content { background-color: #22272e !important; color: #d4d8de; border-color: #30363d; }
+html[data-theme=dark] body.chat .message-widget.mine .message-widget-tab,
+html[data-theme=dark] body.chat .message-widget.mine .message-widget-content { background-color: #1f3140 !important; border-color: #2c4a5e; }
+html[data-theme=dark] body.chat .message-widget-tab { color: #8b949e; }
+html[data-theme=dark] body.chat .cbutton { background-color: #2a3038; border-color: #444c56; color: #d4d8de; }
+html[data-theme=dark] body.chat .cbutton:hover { border-color: #5a636e; }
+html[data-theme=dark] body.chat .chat-input-field:not(input):not(textarea) { background-color: #0f1216; border-color: #30363d; }
+/* forum new/edit/reply: fossil's bare form. its title box is type="input", which no text-input rule matches; give it and the
+   editor the page's input look, full width, with room between the rows and the buttons in reach */
+form[action^="/forume"] { line-height: 2; max-width: 60em; }
+form[action^="/forume"] h1 { margin-bottom: .4em; }
+form[action^="/forume"] input[type=input] { box-sizing: border-box; width: 100%; max-width: 40em; padding: 4px 8px; font: inherit;
+  line-height: 1.4; border: 1px solid #c4cad0; border-radius: 4px; background-color: white; color: inherit; }
+form[action^="/forume"] select { margin: .25em 0; }
+form[action^="/forume"] .forum-editor-widget { margin: .5em 0 .75em; }
+form[action^="/forume"] textarea { box-sizing: border-box; width: 100%; height: 22em; padding: 8px; line-height: 1.45; border-radius: 4px; }
+form[action^="/forume"] input[type=submit] { margin-right: .4em; }
+form[action^="/forume"] div.debug { box-sizing: border-box; max-width: 100%; margin-top: 1em; padding: .5em .75em; font-size: .9em;
+  line-height: 1.6; border: 1px solid #e3d9a0; border-radius: 4px; background-color: #fffbe6; color: #3d3a2a; }
+form[action^="/forume"] div.debug br { display: none; }
+form[action^="/forume"] div.debug label { display: block; margin: 0; padding: 0; color: inherit; font-weight: normal; text-transform: none; }
+form[action^="/forume"] div.debug input { margin: 0 .5em 0 0; vertical-align: middle; }
+html[data-theme=dark] form[action^="/forume"] div.debug { background-color: #2a2614; border-color: #5a4f1e; color: #d8cfa8; }
+/* the post being edited or replied to: fossil frames it in a hard black box; use the card hairline and some room below */
+div.forumEdit { border: 1px solid #d0d7de; border-radius: 6px; padding: .5em .9em; margin: .5em 0 1.25em; }
+html[data-theme=dark] div.forumEdit { border-color: #30363d; }
+/* /forumpost: each post a card like the ticket view's, not fossil's bright blue box. the byline is small and muted rather than an h3
+   the size of the title, the artifact link drops its yellow debug tint, the selected post in a thread gets a left accent instead of a fill */
+div.forumTime, div.forumSel { border: 1px solid #d0d7de; border-radius: 6px; padding: .75em 1em; margin: 0 0 1em;
+  background-color: transparent !important; }
+div.forumSel { border-left: 3px solid #3d6f8a; }
+div.forumTime > h1 { margin: 0 0 .15em; font-size: 1.5em; }
+h3.forumPostHdr { margin: 0 0 .75em; font-size: .85em; font-weight: normal; color: #6a737d; }
+h3.forumPostHdr span.debug, h3.forumPostHdr span.debug a { background-color: transparent; border: 0; color: inherit; }
+h3.forumPostHdr a { color: #3b5c6b; }
+div.forumPostBody { margin-bottom: .75em; }
+.forumpost-single-controls { display: flex; flex-wrap: wrap; gap: .4em; align-items: center; }
+.forumpost-single-controls form { display: flex; gap: .4em; margin: 0; }
+.forumpost-single-controls input { margin: 0; }
+.submenu label.submenuckbox { display: inline-flex; align-items: center; gap: .35em; }
+.submenu label.submenuckbox input { margin: 0; }
+html[data-theme=dark] div.forumTime, html[data-theme=dark] div.forumSel { border-color: #30363d; }
+html[data-theme=dark] div.forumSel { border-left-color: #6a9ab0; }
+html[data-theme=dark] h3.forumPostHdr { color: #8b949e; }
+html[data-theme=dark] h3.forumPostHdr a { color: #79b8d6; }
+html[data-theme=dark] h3.forumPostHdr span.debug a { color: #8b949e; }
+/* /forum's thread list (fossil's .fileage table): a 3px top pad and a #eee hover meant for a white page; give it the report tables'
+   cell padding and row rules, and a hover that follows the theme */
+.forumPosts.fileage td { padding: 7px 10px; border-top: 0; border-bottom: 1px solid #e4e4e4; vertical-align: middle; }
+.forumPosts.fileage tr:last-child td { border-bottom: 0; }
+.forumPosts.fileage tr:hover { background-color: #f3f5f7; }
+.forumPosts.fileage td:first-child, .forumPosts.fileage td:last-child { color: #6a737d; }
+html[data-theme=dark] .forumPosts.fileage td { border-bottom-color: #30363d; }
+html[data-theme=dark] .forumPosts.fileage tr:hover { background-color: #2a3038; }
+html[data-theme=dark] .forumPosts.fileage td:first-child, html[data-theme=dark] .forumPosts.fileage td:last-child { color: #8b949e; }
+html[data-theme=dark] body.forum .forumPosts.fileage a:visited { color: #79b8d6; }
+html[data-theme=dark] form[action^="/forume"] input[type=input] { background-color: #0f1216; color: #d4d8de; border-color: #30363d; }
 EOF
 }
 
@@ -1187,11 +1553,467 @@ INSERT INTO r VALUES('By State', '', 'SELECT
   status, type, severity, subsystem, title
 FROM ticket
 ORDER BY status=''Closed'', tkt_mtime DESC');
+INSERT INTO r VALUES('Wiki Pages', '', 'WITH w AS (
+  SELECT substr(comment,2) AS page, comment, mtime, objid,
+    row_number() OVER (PARTITION BY substr(comment,2) ORDER BY mtime DESC) AS n,
+    count(*) OVER (PARTITION BY substr(comment,2)) AS edits,
+    min(mtime) OVER (PARTITION BY substr(comment,2)) AS created
+  FROM event WHERE type=''w''
+)
+SELECT
+  page,
+  (SELECT size FROM blob WHERE rid=w.objid) AS ''size'',
+  edits AS ''edits'',
+  datetime(created) AS ''created'',
+  datetime(mtime) AS ''mtime''
+FROM w
+WHERE n=1 AND comment NOT LIKE ''-%''
+ORDER BY page');
 DELETE FROM reportfmt WHERE title IN (SELECT title FROM r);
 INSERT INTO reportfmt(owner, title, mtime, cols, sqlcode)
   SELECT 'tkt', title, strftime('%s','now'), cols, sqlcode FROM r;
 DROP TABLE r;
 EOF
+}
+
+# the formatting guide: one markdown page, seeded by init as the wiki page below and linked from the wiki's Help.
+# tkt owns it, so init rewrites it whenever this text changes; local edits to the page do not survive an init
+GUIDE_PAGE='agents/FormattingHelp'
+format_guide() {
+  local langs
+  langs=$(printf '%s\n' $PRISM_LANGS | grep -vx -e clike -e markup-templating | sed 's/^markup$/html/' | sort | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')
+  cat <<EOF
+# Formatting Help
+
+Wiki pages, ticket descriptions, and ticket comments are all markdown, and render the same way.
+Fossil's own [markdown reference](/md_rules) covers the basics; this page covers what tkt adds.
+
+## Links
+
+| To | Write | Notes |
+| --- | --- | --- |
+| a wiki page | \`[Home](/wiki?name=Home)\` | spaces in names become \`+\` |
+| a ticket | \`[](9e66bb5bc7)\` | shows the hash; \`tkt\` rewrites a bare \`[9e66bb5bc7]\` into this form |
+| a ticket, with text | \`[the pid bug](/tktview/9e66bb5bc7)\` | |
+| a report | \`[Open](/rptview?title=Open+Tickets)\` | |
+| a filtered report | \`[serve](/rptview?title=By+Tag#tag=serve)\` | |
+
+A leading \`/\` is relative to the tracker. Reports can be linked but not embedded in a page.
+
+## Code
+
+A fence names its language and is highlighted by prism:
+
+~~~markdown
+\`\`\`python
+print("hi")
+\`\`\`
+~~~
+
+Highlighted languages: $langs.
+A fence in any other language, or with none, stays plain. Use \`text\` for logs and output.
+
+## Diagrams
+
+Two kinds of fence draw diagrams.
+
+**mermaid** is drawn in the browser. Flowcharts, state, sequence, and mindmap diagrams are known to work:
+
+~~~markdown
+\`\`\`mermaid
+stateDiagram-v2
+  [*] --> stopped
+  stopped --> running: tkt serve
+  running --> stopped: tkt stop
+\`\`\`
+~~~
+
+draws as:
+
+\`\`\`mermaid
+stateDiagram-v2
+  [*] --> stopped
+  stopped --> running: tkt serve
+  running --> stopped: tkt stop
+\`\`\`
+
+It runs in strict mode, so click handlers and html labels are ignored. A diagram that does not parse is left as its source text, with no error.
+
+**pikchr** is built into fossil and drawn on the server, so it needs no scripts:
+
+~~~markdown
+\`\`\`pikchr
+box "cli" fit; arrow; cylinder "tracker" fit
+\`\`\`
+~~~
+
+draws as:
+
+\`\`\`pikchr
+box "cli" fit; arrow; cylinder "tracker" fit
+\`\`\`
+
+Prefer a diagram to ascii art. Both kinds follow the light and dark themes.
+
+## Turning things off
+
+\`TKT_HIGHLIGHT=0\` and \`TKT_MERMAID=0\` at \`tkt init\` or \`tkt serve\` leave out prism and mermaid; their fences then show as plain code.
+EOF
+}
+
+# seed a tkt-owned page from a function's output, committing only when its text changed so init does not pile up wiki versions
+seed_owned() {
+  local f
+  f=$(mktemp)
+  "$2" >"$f"
+  if ! fx wiki export "$1" 2>/dev/null | cmp -s - "$f"; then
+    fx wiki create "$1" "$f" --mimetype text/x-markdown >/dev/null 2>&1 ||
+      fx wiki commit "$1" "$f" --mimetype text/x-markdown >/dev/null
+  fi
+  rm -f "$f"
+}
+
+# the steering page: the one fixed place an agent starts from, linking to the pages the project keeps current.
+# init seeds it once (see SEED_ONCE), so a project may tailor it
+agent_home() {
+  cat <<'EOF'
+# Agent Home
+
+Start here. This page is maintained by `tkt` and rewritten by `tkt init`, so do not edit it: put project
+knowledge in the pages it links to.
+
+## Pages
+
+| Page | What it holds | Kept current by |
+| --- | --- | --- |
+| [System Diagrams](/wiki?name=templates/SystemDiagrams) | how the system is built: parts, control flow, data flow, lifecycles | whoever changes what it draws |
+| [Mapping](/wiki?name=templates/Mapping) | working notes from exploring the code, rough and partly unverified, feeding System Diagrams | anyone exploring; promote what settles |
+| [Lexicon](/wiki?name=templates/Lexicon) | the project's vocabulary: domain and system terms, abbreviations, words to avoid | whoever introduces or renames a term |
+| [Style](/wiki?name=templates/Style) | how code, tests, commits, and prose are written here | whoever changes the practice or its tools |
+| [Workflows](/wiki?name=templates/Workflows) | the commands for setup, build, run, test, release, and recovery | whoever changes a command |
+| [Formatting Help](/wiki?name=agents/FormattingHelp) | markdown, links, highlighting, and diagrams on this tracker | `tkt`; read only |
+| [Wiki Pages](/rptview?title=Wiki+Pages) | every wiki page, filterable by prefix: [agents](/rptview?title=Wiki+Pages#prefix=agents), [templates](/rptview?title=Wiki+Pages#prefix=templates) | |
+
+## Standing rules
+
+- **Read before you change.** Read the pages above that touch your task before starting it.
+- **Keep pages current.** Update a page in the same change that makes it wrong. A stale page is worse
+  than none.
+- **Sources, in order of trust:** the code, then the docs and these pages, then tickets. Where they
+  disagree, follow the code and file a ticket about the mismatch.
+- **Describe what exists.** Planned work lives in tickets, not in these pages.
+- **Link, don't repeat.** Link tickets as `[](<hash>)` and other pages by name instead of copying them.
+  Name code paths in backticks.
+- **Keep the headings.** A page's section headings are its structure; keep them even when a section is
+  short.
+
+## Template pages
+
+A page that opens with a **Template** note has not been filled in yet. Fill it in following its
+*Instructions* blocks, then delete that note and those blocks. Keep everything else on the page,
+including its *Conventions* section: those rules hold for every later edit.
+EOF
+}
+
+
+# template pages: project-agnostic starting points that agents fill in. unlike the guide, the project owns them,
+# so init creates each one only when it is missing and never touches it again
+system_diagrams_template() {
+  cat <<'EOF'
+# System Diagrams
+
+> **Template.** This page has not been filled in yet. Follow [Agent Home](/wiki?name=agents/Home) and each
+> *Instructions* block below, then delete this note and the *Instructions* blocks. Keep the
+> *Conventions* section: it governs every later edit to this page.
+
+## Conventions
+
+- **Dialect:** mermaid for every diagram. Use pikchr only where exact placement carries meaning
+  (a physical, network, or memory layout). Never ascii art. See [Formatting Help](/wiki?name=agents/FormattingHelp).
+- **Size:** at most about 12 nodes per diagram. When a picture needs more, draw the coarse version and
+  split the detail into its own subsection with its own diagram.
+- **Names:** label nodes with the names used in the code (module, binary, table, service), so a reader
+  can search for them, and use the same name for the same thing in every diagram on the page.
+- **Plain syntax:** a mermaid diagram that fails to parse shows as plain text with no error. Use simple
+  ids (`api`, `db`), labels in double quotes (`api["HTTP API"]`), no styling, no `click`, no html in labels.
+- **Prose:** one to three sentences under each diagram saying what to notice, not a restatement of every arrow.
+- **Current:** this page draws the system as it is. Change it in the same commit that changes what it draws.
+
+## Overview
+
+*Instructions:* one `flowchart LR` of the whole system: its major parts as nodes, and arrows labelled
+with how they talk (call, http, queue, file, sql). Draw people and outside systems at the edges, using
+the `(( ))` circle shape. Follow it with two or three sentences on what the system is for and who uses it.
+
+## Components
+
+*Instructions:* one entry per node in the overview, as a table with these columns:
+
+| Component | Responsibility | Code | Tickets |
+| --- | --- | --- | --- |
+| `example` | one sentence on what it owns | `src/example/` | [](<hash>) |
+
+Draw a component's insides only when they matter to someone changing it, as a subsection here with its
+own small `flowchart`.
+
+## Control flow
+
+*Instructions:* what drives the system and in what order: entry points (commands, requests, jobs,
+events), what each one calls, and where control branches, retries, or hands off to another process.
+Use a `flowchart TD` with decision nodes (`check{"valid?"}`) for branching inside one process, or a
+`sequenceDiagram` when the story is calls passing between processes. One diagram per important entry
+point, starting with the most used one.
+
+## Data flow
+
+*Instructions:* how data moves and changes shape for the most important operation: where it enters,
+each place it is transformed or stored, and where it leaves. Use a `flowchart LR` with data stores as
+cylinders (`db[("orders")]`) and arrows labelled with what moves along them. If the system has a
+persistent data model, add an `erDiagram` of the main tables or records, keys and relations only.
+
+## Lifecycle
+
+*Instructions:* if anything has states (a process, a request, a record, a ticket), draw them with
+`stateDiagram-v2`: every state, the event or command on each transition, and the start and end states.
+One diagram per thing that has states. Delete this section if nothing does.
+
+## Open questions
+
+*Instructions:* a bullet list of what was unclear, contradictory, or planned while drawing the above,
+each linked to a ticket. File a ticket for any that has none.
+EOF
+}
+
+lexicon_template() {
+  cat <<'EOF'
+# Lexicon
+
+> **Template.** This page has not been filled in yet. Follow [Agent Home](/wiki?name=agents/Home) and each
+> *Instructions* block below, then delete this note and the *Instructions* blocks. Keep the
+> *Conventions* section: it governs every later edit to this page.
+
+## Conventions
+
+- **One meaning per term.** If a word is used two ways, say so in the entry and say which one wins.
+- **The code's spelling.** Give the identifier the code uses for a term (class, table, flag, field) in backticks,
+  so a reader can search for it. Where the code and the docs use different words, list both and mark the one to use.
+- **Short entries.** One or two sentences. Link to [System Diagrams](/wiki?name=templates/SystemDiagrams) or a ticket
+  instead of explaining at length.
+- **Alphabetical** within each section.
+- **Use the terms.** Tickets, commits, and other pages use the preferred term from this page. Add a term here
+  before relying on it elsewhere.
+- **Current:** change an entry in the same commit that changes what it names.
+
+## Domain
+
+*Instructions:* the words the project's users and problem space use, independent of how the code is built.
+One row each:
+
+| Term | Meaning | In code |
+| --- | --- | --- |
+| example | one or two sentences | `Example` |
+
+## System
+
+*Instructions:* names for the parts of this system: components, processes, files, stores, states, and
+the like, using the same names as the System Diagrams page. Same table shape as above.
+
+## Abbreviations
+
+*Instructions:* acronyms and short forms found in the code, docs, and tickets, each with its expansion and
+a link to its row above when it has one.
+
+| Short | Stands for |
+| --- | --- |
+
+## Avoid
+
+*Instructions:* words that are ambiguous, outdated, or wrong here, each with the term to use instead and
+why. Include old names still found in the code or history.
+
+| Avoid | Use instead | Why |
+| --- | --- | --- |
+EOF
+}
+
+style_template() {
+  cat <<'EOF'
+# Style
+
+> **Template.** This page has not been filled in yet. Follow [Agent Home](/wiki?name=agents/Home) and each
+> *Instructions* block below, then delete this note and the *Instructions* blocks. Keep the
+> *Conventions* section: it governs every later edit to this page.
+
+## Conventions
+
+- **Describe the house style as practiced.** Derive rules from the code, config, and history, not from general
+  best practice. Where the codebase is inconsistent, say so and name the side new work follows.
+- **Tools first.** When a formatter, linter, or config file enforces a rule, name the tool, its config file, and
+  the command that runs it, and do not restate its rules here.
+- **Rules with examples.** Each rule is one line, with a short do / don't example where the difference is not obvious.
+- **Only what a newcomer would get wrong.** Skip rules that every competent contributor already follows.
+- **Words** follow [Lexicon](/wiki?name=templates/Lexicon).
+- **Current:** change a rule in the same commit that changes the practice or the tool config.
+
+## Tooling
+
+*Instructions:* formatters, linters, type checkers, and pre-commit hooks: one row each.
+
+| Tool | Config | Command | Enforced in CI |
+| --- | --- | --- | --- |
+| example | `path/to/config` | `make lint` | yes |
+
+## Code
+
+*Instructions:* conventions the tools do not enforce: naming, file and module layout, error handling,
+logging, comments, dependencies, and anything the project does differently from its language's norms.
+
+## Tests
+
+*Instructions:* where tests live, how they are named, the command to run them, and what a change is expected
+to come with (a regression test per bug fix, for example).
+
+## Commits and reviews
+
+*Instructions:* branch names, commit message form, what goes in one commit, and how changes reach the main
+branch. Quote two real commit messages that show the form.
+
+## Writing
+
+*Instructions:* voice and format for docs, comments, tickets, and these pages: tone, tense, heading case,
+line length, and how much to explain.
+EOF
+}
+
+workflows_template() {
+  cat <<'EOF'
+# Workflows
+
+> **Template.** This page has not been filled in yet. Follow [Agent Home](/wiki?name=agents/Home) and each
+> *Instructions* block below, then delete this note and the *Instructions* blocks. Keep the
+> *Conventions* section: it governs every later edit to this page.
+
+## Conventions
+
+- **Commands, not prose.** Each task is the exact command to run, in a `bash` fence, from the repository root
+  unless it says otherwise, with one line on what it does and how long it takes when that is more than a minute.
+- **Verified.** Every command here has been run and works. Mark one you could not run with *(unverified)* and why.
+- **Prefer the project's wrappers.** When a `Makefile`, script, or task runner covers a task, give that, not the
+  raw tool command it calls.
+- **Rules live elsewhere.** Formatting and lint rules belong on [Style](/wiki?name=templates/Style); this page only says
+  how to run the tools.
+- **Current:** change a command in the same commit that changes it.
+
+## Setup
+
+*Instructions:* from a fresh clone to a working build: prerequisites with versions, install steps, and any
+env vars or local config files to create (name the example file to copy, never real secrets).
+
+## Build and run
+
+*Instructions:* how to build, how to run the system locally, and how to tell it is up (a url, a port, a
+log line).
+
+## Test
+
+*Instructions:* how to run all tests, one file, and one test by name, plus anything slow or needing a
+service, and how to skip it.
+
+## Check before committing
+
+*Instructions:* the commands to run before a commit (format, lint, type check, tests), in order, ideally one
+command that runs them all.
+
+## Release
+
+*Instructions:* how a version is cut and shipped, or "not applicable" with a reason.
+
+## Recover
+
+*Instructions:* how to get back to a clean state when something breaks: clean build outputs, reset local
+data, rebuild caches, stop stray processes. Say what each one destroys.
+EOF
+}
+
+mapping_template() {
+  cat <<'EOF'
+# Mapping
+
+> **Template.** This page has not been filled in yet. Follow [Agent Home](/wiki?name=agents/Home) and each
+> *Instructions* block below, then delete this note and the *Instructions* blocks. Keep the
+> *Conventions* section: it governs every later edit to this page.
+
+## Conventions
+
+- **Working notes, not a reference.** This is the raw map of what has been found while exploring the code. It may be
+  messy, partial, and wrong. [System Diagrams](/wiki?name=templates/SystemDiagrams) is the curated picture; this page
+  is where material for it is gathered.
+- **Discovered, not designed.** Record what the code actually contains, as found, with the path or command that
+  shows it. No conceptual or planned parts.
+- **Mark confidence.** Tag each claim *confirmed* (read or ran it), *likely* (inferred from names or partial reading),
+  or *guess*. Upgrade the tag when you check it.
+- **Append freely, prune carefully.** Add findings as you go. Delete a finding only when it is shown wrong, or once it
+  has been promoted, and leave a line saying where it went.
+- **Promote what settles.** When part of the map stops changing, move it into System Diagrams,
+  [Lexicon](/wiki?name=templates/Lexicon), or [Workflows](/wiki?name=templates/Workflows), and link to it from here.
+- **Crude diagrams are fine.** A rough mermaid sketch, even a large one, beats none; tidy it when it is promoted.
+
+## Folders and files
+
+*Instructions:* the directory tree as far as it has been explored, one line per folder or notable file on what it
+appears to hold, with a confidence tag. Note generated, vendored, and dead-looking code. A trimmed `tree` or
+`ls` listing in a `text` fence is a fine start.
+
+## Entry points
+
+*Instructions:* every way execution starts that you have found (binaries, scripts, `main` functions, routes, jobs,
+hooks, tests), with path and confidence.
+
+## Symbols
+
+*Instructions:* the types, functions, tables, config keys, and constants that keep coming up, one row each,
+with where they are defined and a confidence tag.
+
+| Symbol | Kind | Defined at | What it seems to do |
+| --- | --- | --- | --- |
+| `example` | function | `src/example.py:42` | *likely:* one line |
+
+## Useful commands
+
+*Instructions:* commands that helped explore: searches that find things (`grep`/`rg` patterns, `git log -S`),
+introspection and debug flags, ways to dump state, queries against local data. Each with one line on what it
+shows. Everyday build and test commands belong on Workflows; move a command there once it becomes routine.
+
+## Dependencies
+
+*Instructions:* external services, libraries that shape the design, and internal modules that everything imports.
+Which parts depend on which, as found.
+
+## Sketches
+
+*Instructions:* rough diagrams made while exploring, newest first, each with a date and the question it was
+answering.
+
+## Unknowns
+
+*Instructions:* what is still unexplored or unexplained: directories not yet read, code whose purpose is unclear,
+contradictions between findings. Remove an entry when it is answered and record the answer above.
+EOF
+}
+
+# pages the project owns once seeded, each with the function that writes it: init creates a missing one and never
+# touches it again. agents/Home tells agents it is tkt's and not theirs to edit, but humans may tailor it per project
+SEED_ONCE='agents/Home:agent_home templates/SystemDiagrams:system_diagrams_template templates/Lexicon:lexicon_template templates/Style:style_template templates/Workflows:workflows_template templates/Mapping:mapping_template'
+
+seed_templates() {
+  local f t
+  f=$(mktemp)
+  for t in $SEED_ONCE; do
+    fx wiki export "${t%%:*}" >/dev/null 2>&1 && continue
+    "${t##*:}" >"$f"
+    fx wiki create "${t%%:*}" "$f" --mimetype text/x-markdown >/dev/null
+  done
+  rm -f "$f"
 }
 
 verb_init() {
@@ -1207,6 +2029,8 @@ verb_init() {
   elif [ -z "$adopt" ] && ! owned "$REPO"; then
     die "$REPO is not a tkt tracker; init would replace its ticket schema, ticket view, and main menu, and give anonymous users read access. Rerun with --adopt to do that anyway"
   fi
+  # best effort: whatever goes wrong here, init carries on and pages fall back to the cdn
+  ( store_assets ) || note "page scripts: storing them failed; pages load them from cdnjs"
   tmp=$(mktemp -d)
   schema >"$tmp/schema"
   common >"$tmp/common"
@@ -1217,6 +2041,8 @@ verb_init() {
   skin_header "$(github_url || true)" >"$tmp/header"
   skin_footer >"$tmp/footer"
   skin_details >"$tmp/details"
+  init_config
+  old_actions_page
   reports >"$tmp/reports"
   sqlq "replace into config(name,value,mtime) values('ticket-table',cast(readfile('$tmp/schema') as text),strftime('%s','now'));" \
        "insert or ignore into config(name,value,mtime) values('ticket-common',cast(readfile('$tmp/common') as text),strftime('%s','now'));" \
@@ -1236,7 +2062,10 @@ verb_init() {
   rm -rf "$tmp"
   fx user capabilities nobody "$GUEST" >/dev/null
   fx user capabilities anonymous "$GUEST" >/dev/null
+  seed_owned "$GUIDE_PAGE" format_guide || note "formatting guide: seeding the wiki page failed"
+  seed_templates || note "agent home and template pages: seeding them failed"
   fossil rebuild "$REPO" >/dev/null
+  init_skill
   note "ready at $REPO"
 }
 
@@ -1561,6 +2390,23 @@ open_when_up() {
   ) </dev/null >/dev/null 2>&1 &
 }
 
+# this script's own absolute path, links resolved, for fossil to run as CGI
+self_path() {
+  local p=$0
+  case "$p" in */*) ;; *) p=$(command -v "$p") ;; esac
+  (cd "$(dirname "$p")" && printf '%s/%s' "$(pwd -P)" "$(basename "$p")")
+}
+
+# $REPO.ext holds only a link to this script: fossil's extroot, which runs it as CGI, and the first PATH entry of
+# every job, so an action that runs plain `tkt`, such as an agent using the tkt skill, gets this one. under CGI
+# self_path is that link, so it is resolved, or the link would point at itself
+ext_link() {
+  local me
+  me=$(readlink -f "$(self_path)" 2>/dev/null || self_path)
+  mkdir -p "$REPO.ext"
+  [ "$(readlink "$REPO.ext/tkt" 2>/dev/null)" = "$me" ] || ln -sfn "$me" "$REPO.ext/tkt"
+}
+
 verb_serve() {
   need
   local at url
@@ -1573,7 +2419,9 @@ verb_serve() {
   printf '%s\n' "$url"
   note "serving $REPO in the foreground as pid $$; Ctrl-C or tkt stop ends it"
   open_when_up "$at" "$url"
-  exec fossil server "$REPO" --port "$at" --localhost --localauth
+  # fossil runs this script as CGI for /ext/tkt, which serves the project actions
+  ext_link
+  exec fossil server "$REPO" --port "$at" --localhost --localauth --extroot "$REPO.ext"
 }
 
 verb_stop() {
@@ -1663,17 +2511,74 @@ allowed-tools: Bash(tkt:*)
 description is the current statement of the problem and is rewritten in place. Comments
 are an append-only log beside it. Both are markdown.
 
+Beyond plain markdown, both render ```` ```mermaid ```` and ```` ```pikchr ```` fences as diagrams and
+highlight fences that name a language. A bare `[<hash>]` links to that ticket. Prefer a diagram
+or a highlighted fence to ascii art. The full rules are on the tracker's `agents/FormattingHelp` wiki
+page (`tkt status` prints the url; the page is `/wiki?name=agents/FormattingHelp`).
+
 Run `tkt help` for the full verb list. This skill covers how to use it well.
+
+## When invoked as /tkt
+
+The human typed: `/tkt $ARGUMENTS`
+
+Skip this section when that line shows no `/tkt` invocation. Otherwise act on the first match below.
+The **active ticket** is the one most recently shown, filed, or changed in this conversation.
+
+| Arguments | Do this |
+| --- | --- |
+| *(none)* | Run `tkt triage` and summarize it in a few lines. Name the active ticket, if any. |
+| one hex word of 4+ characters matching exactly one ticket | Run `tkt show <id>` and summarize it: the problem, its state, and what is owed. It becomes the active ticket. |
+| such a hex word, then an instruction | That ticket becomes the active ticket; follow the instruction for it, as below. Project actions run this way, as `/tkt <id> groom`. |
+| `wiki map [focus]`, `map [focus]` | Work on the project's `Mapping` page; see *Map and diagram* below. |
+| `wiki system [focus]`, `diagram [focus]` | Work on the project's `SystemDiagrams` page; see *Map and diagram* below. |
+| `wiki ...` (anything else) | Treat it as a free-form instruction about the wiki. Read `agents/Home` first. |
+| anything else | An instruction about the active ticket. First state the active ticket's id and title; if there is none, ask which ticket. Named instructions follow. |
+
+Named instructions:
+
+- `groom`: rewrite the description into the four sections, folding in what the comments
+  settled; fix tags, severity, and links to related tickets. Show the result.
+- `plan`: read the ticket and the code it touches, then propose steps. Change nothing.
+- `review`: review the code against the ticket's requirements (its Symptom and Todo, and what
+  the comments settled). Change nothing.
+  - A closed ticket: say so first, then review anyway.
+  - The work is usually the uncommitted diff (`git status`, `git diff HEAD`). It may also be
+    partly committed already: check `git log` for commits naming the ticket or touching its files.
+  - Report each requirement as met, partial, or missing, with `file:line`; then defects and
+    risks beyond the requirements.
+  - When `tkt` prints `running inside project action`, post the review as one comment on the
+    ticket (`tkt comment <id>`). Otherwise reply in the session and post nothing.
+- `close`: close only when the rules under *Closing* hold; otherwise say what is still owed.
+- `note <text>`: add `<text>` as a comment, tidied into the ticket's voice.
+
+### Map and diagram
+
+The page is `Mapping` or `SystemDiagrams`. If it does not exist, start it with
+`tkt wiki cp templates/<Name> <Name>`. Read `agents/Home` and the page, then follow its
+*Conventions* and *Instructions*.
+
+These jobs have no natural end, so work in bounded passes:
+
+- With a focus (`/tkt map the serve lifecycle`), cover that focus. Without one, pick the most
+  useful gap: an empty section, the *Unknowns* list, or the area the conversation is about.
+- Stop after one substantial pass: about two sections, or one area explored in depth. Save
+  with `tkt wiki put <Name> --base <version>` before stopping.
+- Then report: what you added or changed, what is still missing, and the focus you suggest
+  for the next pass. Do not start that pass unasked.
 
 ## Before the first call
 
 ```bash
-command -v tkt && tkt list
+tkt list
 ```
+
+Run it alone, as written: every `tkt` call is a plain command starting with `tkt`, never chained with
+`&&`, `;` or a pipe, so it matches a `Bash(tkt:*)` permission and runs where other commands are refused.
 
 | Result | Action |
 | --- | --- |
-| `tkt` not found | Stop and give the human the install step from the tkt README. Do not fall back to raw `fossil` commands. |
+| `tkt: command not found` | Stop and give the human the install step from the tkt README. Do not fall back to raw `fossil` commands. |
 | `no tracker at ...` | Ask the human before running `tkt init`, since it creates a file in their repository. |
 | `schema predates the ... field` | Run `tkt init`. It is idempotent and only migrates. |
 | `found a tracker under the old name` | Give the human the rename it names. Do not rename the file yourself. |
@@ -1813,11 +2718,80 @@ Each tracker has one server: a new `tkt serve`, from any terminal, stops the old
 - **What the human can do there:** file, edit, comment on, close, and reopen tickets.
   Blockers and parents are command-line only.
 
+## Wiki
+
+The tracker's wiki holds the project pages agents keep current. Start every wiki task at
+`agents/Home`: it lists the pages and the rules for them.
+
+| Intent | Command |
+| --- | --- |
+| List pages | `tkt wiki ls`, or `tkt wiki ls templates` |
+| Read a page | `tkt wiki get <page>`; stderr gives its version |
+| Write a page | `tkt wiki put <page> --base <version> <<'EOF'` ... |
+| Start a page from a template | `tkt wiki cp templates/<Name> <Name>` |
+| Retire a page | `tkt wiki rm <page> --base <version>` |
+
+- Always `get` before `put`, and pass the version it printed as `--base`, so a human's edit made
+  in between is never overwritten. When `put` reports the page changed, `get` it again and redo
+  the edit on the new text.
+- `put` replaces the whole page. Carry forward everything that still holds, including the
+  page's *Conventions* section.
+- Never write `agents/` pages, which humans own. `--force` exists for when the human asks.
+- Use `cp` only from `templates/`. Fill the copy in; leave the template as it is.
+
+## Actions
+
+Project actions are commands the human can run from buttons in the web ui. `tkt action list`
+shows them; `tkt action run <name> [<id>]` runs one as its button does, streaming its log and
+exiting with its code. They need jq.
+
+- They come from the `actions` key of `.tkt.json` beside the tracker: json once its whole-line `//`
+  comments are dropped. Each is `{"name", "label", "icon", "command": [argv...], "comment"}`; `{ticket}`,
+  `{repo}`, and `{tkt}` (tkt's own path) are filled in, `icon` is a tabler icon name, and `comment: true`
+  posts the result to the ticket the run started from. The `config/Actions` wiki page is no longer read.
+- `"skill": ["groom"]` instead of a command runs the top-level `agent` argv with its `{prompt}` set to
+  `/tkt {ticket} groom`, so such a job may be you, running this skill.
+- An action whose command uses `{ticket}` is a ticket action and needs an id; any other is a
+  project action, where an id is optional and only says which ticket gets the comment.
+  `tkt action list` shows each one's scope.
+- Add or change actions only when the human asks: they run commands on their machine.
+  Never edit `.tkt.json` unasked.
+- `tkt action clean [--keep <n>]` retires old finished jobs to the temp dir; it deletes nothing.
+- Prefer an existing action over an ad-hoc command when it does what the human wants, so the
+  run lands in the same job history the web ui shows.
+
 ## Reporting
 
 When you mention a ticket to the human, give its id and title. When `tkt status`
 succeeds, also give the link: its url with `/ticket` replaced by `/tktview/<id>`.
 SKILL_MD
+}
+
+# write the skill into one skills directory, refusing a symlinked one; returns 1 when it was not written
+put_skill() {
+  if [ -L "$1" ]; then note "$1 is a symlink; update the skill where it points instead"; return 1; fi
+  mkdir -p "$1" && skill_md >"$1/SKILL.md"
+}
+
+# init installs the project skill only for agents the project already uses: a .claude/ (Claude Code), .pi/ (pi), or
+# .agents/ (the shared agent skills location, which pi also finds from subdirectories) directory beside the tracker.
+# it never creates one, and says what it did either way
+init_skill() {
+  local root agent dir found=
+  root=$(dirname "$REPO")
+  for agent in .claude .pi .agents; do
+    [ -d "$root/$agent" ] || continue
+    found=1
+    dir=$root/$agent/skills/tkt
+    if [ -f "$dir/SKILL.md" ] && skill_md | cmp -s - "$dir/SKILL.md"; then
+      note "agent skill: $agent/skills/tkt/SKILL.md is already current"
+    elif [ -f "$dir/SKILL.md" ]; then
+      put_skill "$dir" && note "agent skill: found $agent/, updated $agent/skills/tkt/SKILL.md to this tkt's version"
+    else
+      put_skill "$dir" && note "agent skill: found $agent/, installed $agent/skills/tkt/SKILL.md so agents in this project know how to use tkt"
+    fi
+  done
+  [ -n "$found" ] || note "agent skill: no .claude/, .pi/, or .agents/ beside the tracker, so none installed; run 'tkt skill install --project' to add one here, or 'tkt skill install' for every project"
 }
 
 verb_skill() {
@@ -1829,8 +2803,7 @@ verb_skill() {
     *) die 'usage: tkt skill [install [--project]]' ;;
   esac
   [ ! -L "$dir" ] || die "$dir is a symlink; update the skill where it points instead"
-  mkdir -p "$dir"
-  skill_md >"$dir/SKILL.md"
+  put_skill "$dir"
   note "installed $dir/SKILL.md"
 }
 
@@ -1840,14 +2813,609 @@ verb_run() {
   fx "$@"
 }
 
+# wiki pages, for agents keeping the project's pages current. pages are markdown; a page emptied by rm is hidden
+# by fossil and treated as absent here. each page's latest version id lets put and rm refuse a stale write (--base)
+wiki_name() {
+  case "$1" in
+    '') die 'a page name is required' ;;
+    /*|*/|*//*) die "bad page name: $1" ;;
+    branch/*|tag/*|checkin/*) die "fossil reserves the ${1%%/*}/ prefix for its own notes; pick another name" ;;
+  esac
+}
+# the latest version of a page as 'uuid|mark', where mark is - for an emptied page; nothing when it never existed
+wiki_head() {
+  sqlq "select b.uuid || '|' || substr(e.comment,1,1) from event e join blob b on b.rid=e.objid where e.type='w' and substr(e.comment,2)=$(lit "$1") order by e.mtime desc, e.objid desc limit 1;"
+}
+wiki_exists() { local h; h=$(wiki_head "$1"); [ -n "$h" ] && [ "${h##*|}" != - ]; }
+wiki_version() { local h; h=$(wiki_head "$1"); h=${h%%|*}; printf '%s' "${h:0:10}"; }
+# a write needs --force for agents/ pages, which agents are told not to edit, and --base must match the latest version
+wiki_guard() {
+  local page=$1 base=$2 force=$3 cur
+  case "$page" in agents/*) [ -n "$force" ] || die "$page steers agents and is edited by humans; pass --force if you were asked to change it" ;; esac
+  [ -z "$base" ] && return 0
+  cur=$(wiki_version "$page")
+  case "$cur" in "$base"*) [ -n "$cur" ] && return 0 ;; esac
+  die "$page changed since version $base (now ${cur:-absent}); run tkt wiki show $page and redo the edit"
+}
+wiki_write() {
+  local f
+  f=$(mktemp)
+  printf '%s\n' "$2" >"$f"
+  if wiki_head "$1" | grep -q .; then fx wiki commit "$1" "$f" --mimetype text/x-markdown >/dev/null
+  else fx wiki create "$1" "$f" --mimetype text/x-markdown >/dev/null; fi
+  rm -f "$f"
+}
+wiki_usage() { die 'usage: tkt wiki ls|list [prefix] | get|show <page> | put <page> [--base <v>] [--force] | rm <page> [--base <v>] [--force] | cp|copy <page> <new-page> [--force]'; }
+
+verb_wiki() {
+  need
+  local sub=${1:-} page= dst= base= force= body cur
+  [ $# -eq 0 ] || shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) [ $# -ge 2 ] || wiki_usage; base=$2; shift 2 ;;
+      --base=*) base=${1#--base=}; shift ;;
+      --force) force=1; shift ;;
+      -*) wiki_usage ;;
+      *) if [ -z "$page" ]; then page=$1; elif [ -z "$dst" ]; then dst=$1; else wiki_usage; fi; shift ;;
+    esac
+  done
+  case "$sub" in
+    list|ls)
+      [ -z "$dst$base$force" ] || wiki_usage
+      local where='' pre=${page%/}
+      [ -z "$pre" ] || where="and (page=$(lit "$pre") or substr(page,1,$(( ${#pre} + 1 )))=$(lit "$pre/"))"
+      sqlq "with w as (select substr(comment,2) as page, comment, mtime, objid, row_number() over (partition by substr(comment,2) order by mtime desc, objid desc) as n from event where type='w')
+        select '| Page | Size | Updated |' || char(10) || '| --- | --- | --- |' union all
+        select * from (select '| ' || page || ' | ' || (select size from blob where rid=w.objid) || ' | ' || datetime(mtime) || ' |' from w where n=1 and comment not like '-%' $where order by page collate nocase);" | paint ;;
+    show|get)
+      [ -n "$page" ] && [ -z "$dst$base$force" ] || wiki_usage
+      wiki_name "$page"
+      wiki_exists "$page" || die "no wiki page $page; tkt wiki list shows them"
+      fx wiki export "$page"
+      note "$page is at version $(wiki_version "$page"); tkt wiki put $page --base $(wiki_version "$page") refuses if it changes first" ;;
+    put)
+      [ -n "$page" ] && [ -z "$dst" ] || wiki_usage
+      wiki_name "$page"
+      wiki_guard "$page" "$base" "$force"
+      body=$(slurp editor)
+      [ -n "$(printf '%s' "$body" | tr -d ' \t\n')" ] || die 'nothing on stdin; to retire a page use tkt wiki rm'
+      if wiki_exists "$page" && [ "$(fx wiki export "$page")" = "$body" ]; then note "$page is unchanged"; return; fi
+      if wiki_exists "$page"; then cur=updated; else cur=created; fi
+      wiki_write "$page" "$body"
+      note "$cur $page, now at version $(wiki_version "$page")" ;;
+    rm)
+      [ -n "$page" ] && [ -z "$dst" ] || wiki_usage
+      wiki_name "$page"
+      wiki_exists "$page" || die "no wiki page $page"
+      wiki_guard "$page" "$base" "$force"
+      local f; f=$(mktemp)
+      fx wiki commit "$page" "$f" --mimetype text/x-markdown >/dev/null
+      rm -f "$f"
+      note "removed $page; its history stays in fossil" ;;
+    copy|cp)
+      [ -n "$page" ] && [ -n "$dst" ] && [ -z "$base" ] || wiki_usage
+      wiki_name "$page"; wiki_name "$dst"
+      wiki_exists "$page" || die "no wiki page $page"
+      # copying is for starting a page from a template; any other copy is usually a rename gone wrong
+      case "$page" in templates/*) ;; *) [ -n "$force" ] || die "$page is not a template; copying it duplicates its content, so pass --force if that is what you want" ;; esac
+      ! wiki_exists "$dst" || die "$dst already exists; use tkt wiki put $dst to replace it"
+      case "$dst" in agents/*) [ -n "$force" ] || die "$dst steers agents and is edited by humans; pass --force if you were asked to create it" ;; esac
+      wiki_write "$dst" "$(fx wiki export "$page")"
+      note "copied $page to $dst, now at version $(wiki_version "$dst")" ;;
+    *) wiki_usage ;;
+  esac
+}
+
+# project actions: buttons that run project commands on the server, from fossil's /ext CGI, and the same runs
+# from the cli. each is configured as
+#   {"name": "a-z0-9-", "label": "Button text", "command": ["argv", "{ticket}"], "comment": true}
+# command is an argv, run without a shell from the tracker's directory, with {ticket}, {repo}, and {tkt} (this
+# script, for actions that call tkt back) filled in; comment
+# posts the exit code and the log's tail to the ticket. names are what fossil allows in an /ext path. jq reads them
+ACTION_TAIL=40
+TABLER_ICONS=https://cdn.jsdelivr.net/npm/@tabler/icons@3.19.0/icons/outline
+JOBS_KEEP=20
+# the wiki page actions were configured on before .tkt.json; no longer read, only named so its owner can move off it
+OLD_ACTIONS_PAGE=config/Actions
+
+have_jq() { command -v jq >/dev/null; }
+
+# actions live in .tkt.json beside the tracker, under its actions key. jq reads plain json, so whole-line // comments
+# are dropped first, json5-style, which lets the file explain itself; a // inside a value is left alone
+actions_file() { printf '%s/.tkt.json' "$(dirname "$REPO")"; }
+config_json() { sed -e '/^[[:space:]]*\/\//d' "$(actions_file)"; }
+config_ok() { [ -f "$(actions_file)" ] && config_json | jq -e 'type == "object"' >/dev/null 2>&1; }
+actions_json() {
+  [ -f "$(actions_file)" ] || return 0
+  if ! config_ok; then note "$(actions_file) is not valid json, even without its // comments, so there are no actions"; return 0; fi
+  # a skill action is shorthand for the agent running the tkt skill on the ticket: its words follow /tkt {ticket},
+  # and that prompt fills the agent's {prompt}. without an agent that has one, a skill action is skipped
+  config_json | jq '(.agent | if type == "array" and any(.[]; type == "string" and contains("{prompt}")) then map(tostring) else null end) as $agent
+    | [(.actions // [])[]? | if type == "object" and (.skill | type == "array") and (has("command") | not) then
+        (if $agent then (["/tkt {ticket}"] + (.skill | map(tostring)) | join(" ")) as $p
+          | . + {command: ($agent | map(gsub("\\{prompt\\}"; $p)))} else empty end)
+      else . end]'
+}
+
+# a tracker that still has the old wiki page is told once per listing, and by init, where its actions belong now
+old_actions_page() {
+  if wiki_exists "$OLD_ACTIONS_PAGE" 2>/dev/null; then
+    note "the $OLD_ACTIONS_PAGE wiki page is no longer read; move its actions into $(actions_file), then tkt wiki rm $OLD_ACTIONS_PAGE"
+  fi
+}
+
+# the commented starting config init writes when there is none; its comments are the format's documentation
+default_config() {
+  cat <<EOF
+// tkt project actions: buttons in the web ui that run commands on the server, at /ext/tkt and on each ticket.
+// \`tkt action list\` shows them and \`tkt action run <name> [<id>]\` runs one from the command line. They need jq.
+// This file is json once its whole-line // comments are dropped.
+//
+// Each action:
+//   name     lowercase letters, digits and dashes; part of the url
+//   label    the button text; defaults to the name
+//   command  the argv, run from this directory without a shell, so an argument may hold spaces.
+//            {ticket} becomes the ticket id, {repo} the tracker's path, and {tkt} tkt's own path.
+//            plain tkt is the same tkt too, since a job's PATH starts with it
+//   comment  optional; true posts the exit code and the last $ACTION_TAIL lines of output to the ticket the run
+//            started from
+//   icon     optional; a tabler icon name, as https://tabler.io/icons shows them, such as "player-play".
+//            it loads from the cdn, so offline the button shows its label alone
+//
+// A command that uses {ticket} makes a ticket action: its button shows only on ticket pages, and it runs once at
+// a time per ticket. Any other is a project action: its button shows everywhere, and run from a ticket, that
+// ticket only says where a comment goes.
+//
+// Every run is a job, kept in .tkt.fossil.jobs/ with its command, log and exit code. Clean Jobs retires all but
+// the newest $JOBS_KEEP to \${TMPDIR:-/tmp}/tkt-jobs/, where nothing is deleted.
+//
+// skill   instead of command: the words of a tkt skill instruction, run by the agent on the ticket. ["groom"]
+//          makes the prompt "/tkt {ticket} groom", which fills {prompt} in the agent's argv; so a skill action is
+//          always a ticket action, and is skipped while there is no agent
+//
+// The agent is the coding agent, set once for every skill action: an argv with a {prompt}. tkt is not tied to
+// one; the line below is Claude Code, headless, with the tracker and read-only tools. Drop its // to use it.
+//
+// More, to copy into the list below:
+//   {"name": "test", "label": "Run tests", "icon": "player-play", "comment": true, "command": ["make", "test"]}
+//   {"name": "groom", "label": "Groom", "icon": "wand", "skill": ["groom"]}
+//   {"name": "review", "label": "Review", "icon": "eye-check", "skill": ["review"]}
+{
+//"agent": ["claude", "-p", "{prompt}", "--permission-mode", "dontAsk", "--allowedTools", "Bash(tkt:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob"],
+  "actions": [
+    {"name": "clean-jobs", "label": "Clean Jobs", "icon": "archive", "command": ["tkt", "action", "clean", "--keep", "$JOBS_KEEP"]}
+  ]
+}
+EOF
+}
+
+# init writes the default config only where there is none, and never touches one that exists
+init_config() {
+  if [ -e "$(actions_file)" ]; then return 0; fi
+  default_config >"$(actions_file)"
+  note "project actions: wrote $(actions_file), with Clean Jobs and the format in its comments"
+}
+
+# a ticket relates to a job in three ways, each with one rule:
+#   input    an action whose command uses {ticket} is a ticket action: it runs only against a ticket, shows only
+#            where there is one, and runs once at a time per ticket. any other is a project action, once at a time
+#   output   comment posts the result to the ticket the job ran from, for either kind; without one, nothing is posted
+#   context  a job records the ticket it ran from, when there is one, whatever its kind
+#
+# every valid action as name<TAB>label<TAB>comment|-<TAB>ticket|project<TAB>argv..., tsv-escaped by jq; invalid
+# entries are skipped, and no config or no jq gives nothing
+actions() {
+  have_jq || return 0
+  actions_json | { jq -r '.[]? | select((.name | type == "string" and test("^[a-z0-9-]+$")) and (.command | type == "array" and length > 0))
+    | (.command | map(tostring)) as $argv
+    | [.name, (.label // .name), (if .comment then "comment" else "-" end), (if any($argv[]; contains("{ticket}")) then "ticket" else "project" end),
+       (if (.icon | type == "string" and test("^[a-z0-9-]+$")) then .icon else "-" end)]
+      + $argv | @tsv' 2>/dev/null || true; }
+}
+action_line() { actions | awk -F'\t' -v n="$1" '$1 == n { print; exit }'; }
+action_scope() { action_line "$1" | cut -f4; }
+
+# a job is a directory beside the tracker: action, ticket, cmd (as run), pid, log, and exit once it ends
+jobs_dir() { printf '%s.jobs' "$REPO"; }
+
+job_running() { [ -f "$1/pid" ] && [ ! -f "$1/exit" ] && kill -0 "$(cat "$1/pid")" 2>/dev/null; }
+
+# done once it wrote its exit code, running while its pid lives, died otherwise (killed, reboot). with no pid file
+# yet it is still starting, since the pid is written just after the fork. the exit file is looked at again after
+# the pid, since a job that ends between the two looks wrote it just before it went
+job_state() {
+  if [ -f "$1/exit" ]; then printf 'exit %s' "$(cat "$1/exit")"
+  elif [ ! -f "$1/pid" ] || job_running "$1"; then printf running
+  elif [ -f "$1/exit" ]; then printf 'exit %s' "$(cat "$1/exit")"
+  else printf died; fi
+}
+
+# job ids, newest first. ids sort by start time
+job_ids() {
+  local d all=()
+  for d in "$(jobs_dir)"/*/; do [ -d "$d" ] && all+=("$(basename "$d")"); done
+  [ ${#all[@]} -gt 0 ] || return 0
+  printf '%s\n' "${all[@]}" | sort -r
+}
+
+# the id of a running job of this action, if any: a project action runs once at a time, a ticket action once per
+# ticket. args: action, scope, ticket
+job_active() {
+  local id dir
+  while read -r id; do
+    dir=$(jobs_dir)/$id
+    [ "$(cat "$dir/action")" = "$1" ] || continue
+    if [ "$2" = ticket ] && [ "$(cat "$dir/ticket" 2>/dev/null)" != "$3" ]; then continue; fi
+    if job_running "$dir"; then printf '%s' "$id"; return; fi
+  done < <(job_ids)
+}
+
+# what became of a job's comment: posted, failed, or not posted for want of a ticket; nothing for an action without one
+job_posted() { cat "$1/posted" 2>/dev/null || true; }
+
+# start an action in the background and print its job id; an action already running prints that job's id instead.
+# one fork with every fd closed off, so a CGI request ends at once; launchd or init adopts and reaps the job once
+# its parent exits. it keeps the server's process group, so a foreground server's Ctrl-C ends running jobs too
+job_start() {
+  local name=$1 tid=$2 line id dir w flag scope
+  local -a fields cmd=()
+  line=$(action_line "$name")
+  [ -n "$line" ] || die "no action named $name; tkt action list shows them"
+  IFS=$'\t' read -ra fields <<<"$line"
+  flag=${fields[2]}
+  scope=${fields[3]}
+  [ "$scope" = project ] || [ -n "$tid" ] || die "$name is a ticket action, since its command uses {ticket}; give it a ticket id"
+  id=$(job_active "$name" "$scope" "$tid")
+  if [ -n "$id" ]; then printf '%s' "$id"; return; fi
+  for w in "${fields[@]:5}"; do
+    w=$(printf '%b' "$w")
+    w=${w//\{ticket\}/$tid}
+    w=${w//\{tkt\}/$(self_path)}
+    cmd+=("${w//\{repo\}/$REPO}")
+  done
+  id=$(date +%Y%m%d-%H%M%S)-$$
+  dir=$(jobs_dir)/$id
+  mkdir -p "$dir"
+  printf '%s' "$name" >"$dir/action"
+  printf '%s' "$tid" >"$dir/ticket"
+  date +%s >"$dir/started"
+  printf '%q ' "${cmd[@]}" >"$dir/cmd"
+  ext_link
+  (
+    set +e
+    unset CONTENT_LENGTH CONTENT_TYPE QUERY_STRING REQUEST_METHOD PATH_INFO SCRIPT_NAME SCRIPT_FILENAME REQUEST_URI HTTP_REFERER HTTP_COOKIE
+    cd "$(dirname "$REPO")"
+    # TKT_JOB marks every tkt run inside the job, so an agent the action starts learns where it is from tkt itself
+    export PATH="$REPO.ext:$PATH" TKT_DB=$REPO TKT_JOB=$id TKT_ACTION=$name
+    "${cmd[@]}" >"$dir/log" 2>&1 </dev/null
+    rc=$?
+    if [ "$flag" = comment ] && [ -z "$tid" ]; then
+      echo 'not posted: no ticket' >"$dir/posted"
+    elif [ "$flag" = comment ]; then
+      # fossil's own output goes to the log, so a failure there can be read
+      if { printf 'action `%s` exited %s\n\n```\n' "$name" "$rc"; tail -n "$ACTION_TAIL" "$dir/log"; printf '```\n'; } \
+          | ( set -e; verb_comment "$tid" ) >"$dir/post.log" 2>&1
+      then echo "posted to $tid" >"$dir/posted"
+      else echo 'posting failed; see post.log in the job' >"$dir/posted"; fi
+    fi
+    echo "$rc" >"$dir/exit"
+  ) </dev/null >/dev/null 2>&1 &
+  echo $! >"$dir/pid"
+  disown
+  printf '%s' "$id"
+}
+
+action_usage() { die 'usage: tkt action list | run <name> [<id>] | clean [--keep <n>]'; }
+
+# where clean retires jobs: under the temp dir, one folder per project, so nothing is deleted and the os clears it
+jobs_retired_dir() { local t=${TMPDIR:-/tmp}; printf '%s/tkt-jobs/%s' "${t%/}" "$(basename "$(dirname "$REPO")")"; }
+
+# retire every finished job but the newest keep: move each directory, its log and its record, out of the jobs list.
+# a running job stays, and so does the job doing the cleaning
+jobs_clean() {
+  local keep=$1 id i=0 n=0 dest
+  dest=$(jobs_retired_dir)
+  while read -r id; do
+    i=$((i + 1))
+    [ "$i" -gt "$keep" ] || continue
+    [ "$id" != "${TKT_JOB:-}" ] || continue
+    [ "$(job_state "$(jobs_dir)/$id")" != running ] || continue
+    mkdir -p "$dest"
+    mv "$(jobs_dir)/$id" "$dest/"
+    n=$((n + 1))
+  done < <(job_ids)
+  if [ "$n" -gt 0 ]; then printf 'retired %s job(s) to %s; kept the newest %s\n' "$n" "$dest" "$keep"
+  else printf 'nothing to retire; %s job(s), keeping the newest %s\n' "$i" "$keep"; fi
+}
+
+verb_action() {
+  need
+  case "${1:-}" in
+    clean)
+      local keep=$JOBS_KEEP
+      shift
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --keep) [ $# -ge 2 ] || action_usage; keep=$2; shift 2 ;;
+          --keep=*) keep=${1#--keep=}; shift ;;
+          *) action_usage ;;
+        esac
+      done
+      case "$keep" in ''|*[!0123456789]*) die "not a count: $keep" ;; esac
+      jobs_clean "$keep"
+      return ;;
+  esac
+  have_jq || die 'actions need jq; see https://jqlang.org'
+  case "${1:-}" in
+    list|ls)
+      [ $# -le 1 ] || action_usage
+      old_actions_page
+      if [ -f "$(actions_file)" ]; then note "actions from $(actions_file)"; else note "no $(actions_file), so no actions; tkt init writes a starting one"; fi
+      actions | awk -F'\t' 'BEGIN { print "| Action | Label | Icon | Scope | Comment | Command |"; print "| --- | --- | --- | --- | --- | --- |" }
+        { c = $6; for (i = 7; i <= NF; i++) c = c " " $i; printf "| %s | %s | %s | %s | %s | `%s` |\n", $1, $2, ($5 == "-" ? "" : $5), $4, ($3 == "comment" ? "yes" : ""), c }' | paint ;;
+    run)
+      [ $# -ge 2 ] && [ $# -le 3 ] || action_usage
+      local name=$2 tid= id dir state off=0 size
+      if [ -n "${3:-}" ]; then tid=$(resolve "$3"); tid=${tid:0:10}; fi
+      [ -n "$(action_line "$name")" ] || die "no action named $name in $(actions_file); tkt action list shows them"
+      id=$(job_start "$name" "$tid")
+      dir=$(jobs_dir)/$id
+      note "job $id: $(cat "$dir/cmd")"
+      # stream the log as it grows, then whatever came after the job's last look
+      while :; do
+        state=$(job_state "$dir")
+        size=$(wc -c <"$dir/log" 2>/dev/null | tr -d ' ' || true)
+        size=${size:-0}
+        if [ "$size" -gt "$off" ]; then tail -c +$((off + 1)) "$dir/log" | head -c $((size - off)); off=$size; fi
+        [ "$state" = running ] || break
+        sleep 0.2
+      done
+      if [ -n "$(job_posted "$dir")" ]; then note "job $id: comment $(job_posted "$dir")"; fi
+      case "$state" in
+        died) die "job $id died without an exit code" ;;
+        'exit 0') ;;
+        *) note "job $id: $state"; return "${state#exit }" ;;
+      esac ;;
+    *) action_usage ;;
+  esac
+}
+
+# --- fossil's /ext CGI: tkt serve links $REPO.ext/tkt to this script and passes --extroot. routes, under /ext/tkt:
+#   GET  /ext/tkt[?ticket=ID]     the actions and recent jobs; no trailing slash, which fossil refuses
+#   GET  /buttons?ticket=ID       the bare button row, unskinned, which the ticket page fetches into itself
+#   POST /run/<name>              start an action (form field: ticket), then redirect to its job
+#   GET  /job/<id>[?full=1]       a job's log, its tail refreshing until the job ends
+
+# fossil runs us as CGI with no arguments. CGI vars reach every child, and a child fossil that sees
+# GATEWAY_INTERFACE runs as CGI itself, so it goes once we know. fossil also scrubs PATH and HOME, and gives the
+# repository relative to our cwd
+is_cgi() { [ $# -eq 0 ] && [ -n "${GATEWAY_INTERFACE:-}" ] && [ -n "${FOSSIL_REPOSITORY:-}" ]; }
+cgi_env() {
+  local home=
+  unset GATEWAY_INTERFACE
+  case "$FOSSIL_REPOSITORY" in /*) REPO=$FOSSIL_REPOSITORY ;; *) REPO=$PWD/$FOSSIL_REPOSITORY ;; esac
+  # the server's own user's home, so actions find their tools' settings and logins (a claude, a git config); the
+  # login name is plain text, which makes the eval safe. user-installed tools in ~/.local/bin come first on PATH
+  eval "home=~$(id -un)" 2>/dev/null || true
+  case "$home" in /*) ;; *) home=$(dirname "$REPO") ;; esac
+  export HOME=${HOME:-$home} TKT_DB=$REPO
+  export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+  # USER is scrubbed too, and fossil needs one to write: the web user who pressed the button
+  export USER=${FOSSIL_USER:-${REMOTE_USER:-$(id -un)}}
+  BASE=$SCRIPT_NAME
+}
+
+html() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&#39;/g"; }
+htmls() { printf '%s' "$1" | html; }
+
+# one urldecoded field of a urlencoded string
+form_field() {
+  printf '%s' "$2" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1 \
+    | sed 's/+/ /g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g' | xargs -0 printf '%b'
+}
+
+# the POST body: exactly CONTENT_LENGTH bytes, since fossil never closes our stdin (and macOS head refuses -c 0)
+cgi_body() { if [ "${CONTENT_LENGTH:-0}" -gt 0 ]; then head -c "$CONTENT_LENGTH"; fi; }
+
+# a skinned page: fossil wraps html in the skin only when it opens with a fossil-doc div, whose data-title titles
+# the page. the div closes on exit, so an early cgi_fail still makes a whole page
+cgi_page() {
+  printf 'Status: %s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n' "$1"
+  printf "<div class='fossil-doc' data-title='%s'>\n" "$(htmls "$2")"
+  trap 'printf "</div>\n"' EXIT
+}
+cgi_fail() { cgi_page "$1" "$1"; printf '<p>%s</p>\n' "$(htmls "$2")"; exit 0; }
+cgi_redirect() { printf 'Status: 303 See Other\r\nLocation: %s\r\n\r\n' "$1"; }
+
+# FOSSIL_NONCE is only the CSP nonce and fossil passes no Origin, so a POST must come from a page on this server
+cgi_same_origin() { case "${HTTP_REFERER:-}" in "$REQUEST_SCHEME://$HTTP_HOST/"*) return 0 ;; esac; return 1; }
+
+# the ticket a request names, in TID: nothing, or a uuid prefix matching exactly one ticket, as its 10-character id.
+# not a $(...) helper, so its failure is the reply
+cgi_ticket() {
+  local hits
+  TID=$(form_field ticket "$1")
+  [ -n "$TID" ] || return 0
+  case "$TID" in *[!0-9a-f]*) cgi_fail 400 "bad ticket id: $TID" ;; esac
+  hits=$(sqlq "select substr(tkt_uuid,1,10) from ticket where tkt_uuid like '$TID%';")
+  set -- $hits
+  [ $# -eq 1 ] || cgi_fail 400 "$TID matches no single ticket"
+  TID=$1
+}
+
+# the button row: one form per action, posting the ticket along; nothing at all when there are no actions
+buttons() {
+  local tid=$1 name label flag scope icon rest rows= text img
+  while IFS=$'\t' read -r name label flag scope icon rest; do
+    if [ "$scope" = ticket ] && [ -z "$tid" ]; then continue; fi
+    text=$(htmls "$(printf '%b' "$label")")
+    img=
+    # tabler icons come from the cdn rather than a mirror of the set, so this is the one thing on these pages that
+    # needs the network. the button's own text names it; offline the icon is simply missing
+    if [ "$icon" != - ]; then img="<img class=\"tkt-action-icon\" src=\"$TABLER_ICONS/$icon.svg\" alt=\"\" width=\"16\" height=\"16\">"; fi
+    rows="$rows$(printf '<form method="post" action="%s/run/%s"><input type="hidden" name="ticket" value="%s"><button title="%s">%s%s</button></form>' \
+      "$BASE" "$name" "$tid" "$text" "$img" "$text")"$'\n'
+  done < <(actions)
+  if [ -n "$rows" ]; then printf '<div class="tkt-actions">\n%s</div>\n' "$rows"; fi
+}
+
+# the pages are drawn as the ticket view's cards: a label row with the fold and copy controls, which the skin's script
+# drives on any .tkt-card, then a body. the copy takes the body's text
+card_open() {
+  local svg='<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
+  local clip='<path d="M9 5h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-12a2 2 0 0 0 -2 -2h-2"/><path d="M9 3m0 2a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2z"/>'
+  printf '<div class="tkt-card %s"><div class="tkt-card-label">%s<span class="tkt-card-ctl">' "$1" "$2"
+  printf '<a href="#" class="tkt-fold" aria-label="Collapse">%s class="tkt-fold-up"><path d="M6 15l6 -6l6 6"/></svg>%s class="tkt-fold-down"><path d="M6 9l6 6l6 -6"/></svg></a>' "$svg" "$svg"
+  printf '<a href="#" class="tkt-copy" aria-label="Copy contents">%s class="tkt-clip">%s</svg>%s class="tkt-clipped">%s<path d="M9 14l2 2l4 -4"/></svg></a>' "$svg" "$clip" "$svg" "$clip"
+  printf '</span></div>\n<div class="tkt-card-body">'
+}
+card_close() { printf '</div></div>\n'; }
+
+# a job's state as a badge: exit 0 passes, any other exit fails, died is muted
+state_badge() {
+  local cls
+  case "$1" in 'exit 0') cls=ok ;; exit*) cls=bad ;; running) cls=run ;; *) cls=dead ;; esac
+  printf '<span class="tkt-jobstate tkt-jobstate-%s">%s</span>' "$cls" "$(htmls "$1")"
+}
+
+# seconds as 4s, 2m 5s, or 1h 3m
+span() {
+  local s=$1
+  if [ "$s" -lt 60 ]; then printf '%ss' "$s"
+  elif [ "$s" -lt 3600 ]; then printf '%sm %ss' $((s / 60)) $((s % 60))
+  else printf '%sh %sm' $((s / 3600)) $((s % 3600 / 60)); fi
+}
+
+# when a job started, and how long it ran or has run so far; jobs from before the started file have neither
+job_times() {
+  local dir=$1 t0 t1
+  [ -f "$dir/started" ] || return 0
+  t0=$(cat "$dir/started")
+  if [ -f "$dir/exit" ]; then t1=$(date -r "$dir/exit" +%s); else t1=$(date +%s); fi
+  printf '%s\t%s' "$(date -r "$t0" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -d "@$t0" '+%Y-%m-%d %H:%M:%S')" "$(span $((t1 - t0)))"
+}
+
+route_index() {
+  local id dir src tid when took
+  cgi_ticket "${QUERY_STRING:-}"
+  cgi_page 200 Actions
+  src="<a href=\"#config\"><code>.tkt.json</code></a>"
+  card_open tkt-card-actions "Actions <span class=\"tkt-card-meta\">from $src${TID:+ &middot; for ticket <a href=\"/tktview/$TID\">$TID</a>}</span>"
+  if ! have_jq; then printf '<p><strong>Actions need jq</strong>, which is not on the server&rsquo;s PATH.</p>\n'
+  elif [ -z "$(actions)" ]; then printf '<p>None yet. Add them to %s.</p>\n' "$src"
+  else
+    buttons "$TID"
+    # ticket actions need a ticket, so without one they are only named, as run from a ticket's page
+    if [ -z "$TID" ]; then
+      local named
+      named=$(actions | awk -F'\t' '$4 == "ticket" { printf "%s%s", (n++ ? ", " : ""), $2 }')
+      if [ -n "$named" ]; then printf '<p class="tkt-actions-note">From a ticket&rsquo;s page: %s.</p>\n' "$(htmls "$(printf '%b' "$named")")"; fi
+    fi
+  fi
+  card_close
+  card_open tkt-card-report 'Recent jobs'
+  if [ -z "$(job_ids)" ]; then
+    printf '<p class="tkt-jobs-none">No jobs yet.</p>\n'
+  else
+    printf '<table class="report"><thead><tr><th>Job</th><th>Action</th><th>Ticket</th><th>Started</th><th>Took</th><th>State</th></tr></thead><tbody>\n'
+    while read -r id; do
+      dir=$(jobs_dir)/$id
+      tid=$(cat "$dir/ticket" 2>/dev/null || true)
+      IFS=$'\t' read -r when took <<<"$(job_times "$dir")" || true
+      printf '<tr><td><a href="%s/job/%s">%s</a></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n' \
+        "$BASE" "$id" "$id" "$(html <"$dir/action")" "${tid:+<a href=\"/tktview/$tid\">$tid</a>}" "$when" "$took" \
+        "$(state_badge "$(job_state "$dir")")"
+    done < <(job_ids | head -n 25)
+    printf '</tbody></table>\n'
+  fi
+  card_close
+  card_open tkt-card-config "Config <span class=\"tkt-card-meta\" id=\"config\"><code>$(actions_file | html)</code></span>"
+  if [ -f "$(actions_file)" ]; then printf '<pre>%s</pre>\n' "$(html <"$(actions_file)")"
+  else printf '<p>No config yet; <code>tkt init</code> writes a starting one.</p>\n'; fi
+  card_close
+}
+
+# unskinned, since it lands inside the ticket page
+route_buttons() {
+  cgi_ticket "${QUERY_STRING:-}"
+  printf 'Content-Type: text/html; charset=utf-8\r\n\r\n'
+  buttons "$TID"
+}
+
+route_run() {
+  local name=$1 id
+  [ "$REQUEST_METHOD" = POST ] || cgi_fail 405 'actions run only from a POST'
+  cgi_same_origin || cgi_fail 403 "refused a request from another site (referer: ${HTTP_REFERER:-none})"
+  have_jq || cgi_fail 503 'actions need jq, which is not on the server PATH'
+  cgi_ticket "$(cgi_body)"
+  [ -n "$(action_line "$name")" ] || cgi_fail 404 "no action named $name"
+  [ "$(action_scope "$name")" = project ] || [ -n "$TID" ] || cgi_fail 400 "$name is a ticket action; run it from a ticket"
+  id=$(job_start "$name" "$TID")
+  cgi_redirect "$BASE/job/$id"
+}
+
+# the tail refreshes while the job runs; the full log holds still for reading
+route_job() {
+  local id=$1 dir state full lines tid when took meta keep=200
+  case "$id" in ''|*/*|.*) cgi_fail 400 "bad job id: $id" ;; esac
+  dir=$(jobs_dir)/$id
+  [ -d "$dir" ] || cgi_fail 404 "no job $id"
+  state=$(job_state "$dir")
+  full=$(form_field full "${QUERY_STRING:-}")
+  tid=$(cat "$dir/ticket")
+  IFS=$'\t' read -r when took <<<"$(job_times "$dir")" || true
+  cgi_page 200 "Job: $(cat "$dir/action")"
+  # the skin's page reload toggle does the reloading, so the human can pause it to read
+  if [ "$state" = running ] && [ -z "$full" ]; then printf '<meta name="tkt-reload" content="2">\n'; fi
+  card_open tkt-card-fields "Job <span class=\"tkt-card-meta\">$id &middot; <a href=\"$BASE${tid:+?ticket=$tid}\">all actions and jobs</a></span>"
+  printf '<table class="label-value">\n'
+  printf '<tr><td class="tktDspLabel">Action:</td><td class="tktDspValue">%s</td></tr>\n' "$(html <"$dir/action")"
+  printf '<tr><td class="tktDspLabel">Command:</td><td class="tktDspValue"><code>%s</code></td></tr>\n' "$(html <"$dir/cmd")"
+  printf '<tr><td class="tktDspLabel">State:</td><td class="tktDspValue">%s</td></tr>\n' "$(state_badge "$state")"
+  if [ -n "$tid" ]; then printf '<tr><td class="tktDspLabel">Ticket:</td><td class="tktDspValue"><a href="/tktview/%s">%s</a></td></tr>\n' "$tid" "$tid"; fi
+  if [ -n "$(job_posted "$dir")" ]; then printf '<tr><td class="tktDspLabel">Comment:</td><td class="tktDspValue">%s</td></tr>\n' "$(job_posted "$dir" | html)"; fi
+  if [ -n "$when" ]; then printf '<tr><td class="tktDspLabel">Started:</td><td class="tktDspValue">%s &middot; %s %s</td></tr>\n' "$when" "$( [ "$state" = running ] && echo 'running for' || echo took)" "$took"; fi
+  printf '</table>\n'
+  card_close
+  # awk counts an unfinished last line too, as when a test runner prints dots
+  lines=$(awk 'END { print NR }' "$dir/log" 2>/dev/null || true)
+  lines=${lines:-0}
+  if [ -z "$full" ] && [ "$lines" -gt "$keep" ]; then
+    meta="last $keep of $lines lines &middot; <a href=\"$BASE/job/$id?full=1\">full log</a>"
+  elif [ -n "$full" ]; then
+    meta="$lines lines &middot; <a href=\"$BASE/job/$id\">tail</a>"
+  else
+    meta="$lines line$([ "$lines" = 1 ] || echo s)"
+  fi
+  card_open tkt-card-log "Log <span class=\"tkt-card-meta\">$meta</span>"
+  printf '<pre>'
+  if [ -z "$full" ] && [ "$lines" -gt "$keep" ]; then tail -n "$keep" "$dir/log" | html
+  elif [ -f "$dir/log" ]; then html <"$dir/log"; fi
+  printf '</pre>'
+  card_close
+}
+
+cgi_main() {
+  cgi_env
+  case "${PATH_INFO:-}" in
+    '') route_index ;;
+    /buttons) route_buttons ;;
+    /run/*) route_run "${PATH_INFO#/run/}" ;;
+    /job/*) route_job "${PATH_INFO#/job/}" ;;
+    *) cgi_fail 404 "no page ${PATH_INFO}" ;;
+  esac
+}
+
 main() {
+  if is_cgi "$@"; then cgi_main; return; fi
   local verb=${1:-help}
   [ $# -eq 0 ] || shift
   case "$verb" in
-    help|-h|--help) usage; return ;;
+    help|-h|--help) usage | paint_help; return ;;
     version|--version) printf 'tkt %s\n' "$TKT_VERSION"; return ;;
     skill) verb_skill "$@"; return ;;
-    init|new|show|list|search|todo|triage|edit|comment|tag|block|parent|set|close|clean|serve|stop|status|sql|run) ;;
+    init|new|show|list|search|todo|triage|edit|comment|tag|block|parent|set|close|clean|serve|stop|status|sql|wiki|action|run) ;;
     *) usage >&2; die "unknown verb: $verb" ;;
   esac
   locate

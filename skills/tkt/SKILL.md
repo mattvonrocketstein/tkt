@@ -10,17 +10,74 @@ allowed-tools: Bash(tkt:*)
 description is the current statement of the problem and is rewritten in place. Comments
 are an append-only log beside it. Both are markdown.
 
+Beyond plain markdown, both render ```` ```mermaid ```` and ```` ```pikchr ```` fences as diagrams and
+highlight fences that name a language. A bare `[<hash>]` links to that ticket. Prefer a diagram
+or a highlighted fence to ascii art. The full rules are on the tracker's `agents/FormattingHelp` wiki
+page (`tkt status` prints the url; the page is `/wiki?name=agents/FormattingHelp`).
+
 Run `tkt help` for the full verb list. This skill covers how to use it well.
+
+## When invoked as /tkt
+
+The human typed: `/tkt $ARGUMENTS`
+
+Skip this section when that line shows no `/tkt` invocation. Otherwise act on the first match below.
+The **active ticket** is the one most recently shown, filed, or changed in this conversation.
+
+| Arguments | Do this |
+| --- | --- |
+| *(none)* | Run `tkt triage` and summarize it in a few lines. Name the active ticket, if any. |
+| one hex word of 4+ characters matching exactly one ticket | Run `tkt show <id>` and summarize it: the problem, its state, and what is owed. It becomes the active ticket. |
+| such a hex word, then an instruction | That ticket becomes the active ticket; follow the instruction for it, as below. Project actions run this way, as `/tkt <id> groom`. |
+| `wiki map [focus]`, `map [focus]` | Work on the project's `Mapping` page; see *Map and diagram* below. |
+| `wiki system [focus]`, `diagram [focus]` | Work on the project's `SystemDiagrams` page; see *Map and diagram* below. |
+| `wiki ...` (anything else) | Treat it as a free-form instruction about the wiki. Read `agents/Home` first. |
+| anything else | An instruction about the active ticket. First state the active ticket's id and title; if there is none, ask which ticket. Named instructions follow. |
+
+Named instructions:
+
+- `groom`: rewrite the description into the four sections, folding in what the comments
+  settled; fix tags, severity, and links to related tickets. Show the result.
+- `plan`: read the ticket and the code it touches, then propose steps. Change nothing.
+- `review`: review the code against the ticket's requirements (its Symptom and Todo, and what
+  the comments settled). Change nothing.
+  - A closed ticket: say so first, then review anyway.
+  - The work is usually the uncommitted diff (`git status`, `git diff HEAD`). It may also be
+    partly committed already: check `git log` for commits naming the ticket or touching its files.
+  - Report each requirement as met, partial, or missing, with `file:line`; then defects and
+    risks beyond the requirements.
+  - When `tkt` prints `running inside project action`, post the review as one comment on the
+    ticket (`tkt comment <id>`). Otherwise reply in the session and post nothing.
+- `close`: close only when the rules under *Closing* hold; otherwise say what is still owed.
+- `note <text>`: add `<text>` as a comment, tidied into the ticket's voice.
+
+### Map and diagram
+
+The page is `Mapping` or `SystemDiagrams`. If it does not exist, start it with
+`tkt wiki cp templates/<Name> <Name>`. Read `agents/Home` and the page, then follow its
+*Conventions* and *Instructions*.
+
+These jobs have no natural end, so work in bounded passes:
+
+- With a focus (`/tkt map the serve lifecycle`), cover that focus. Without one, pick the most
+  useful gap: an empty section, the *Unknowns* list, or the area the conversation is about.
+- Stop after one substantial pass: about two sections, or one area explored in depth. Save
+  with `tkt wiki put <Name> --base <version>` before stopping.
+- Then report: what you added or changed, what is still missing, and the focus you suggest
+  for the next pass. Do not start that pass unasked.
 
 ## Before the first call
 
 ```bash
-command -v tkt && tkt list
+tkt list
 ```
+
+Run it alone, as written: every `tkt` call is a plain command starting with `tkt`, never chained with
+`&&`, `;` or a pipe, so it matches a `Bash(tkt:*)` permission and runs where other commands are refused.
 
 | Result | Action |
 | --- | --- |
-| `tkt` not found | Stop and give the human the install step from the tkt README. Do not fall back to raw `fossil` commands. |
+| `tkt: command not found` | Stop and give the human the install step from the tkt README. Do not fall back to raw `fossil` commands. |
 | `no tracker at ...` | Ask the human before running `tkt init`, since it creates a file in their repository. |
 | `schema predates the ... field` | Run `tkt init`. It is idempotent and only migrates. |
 | `found a tracker under the old name` | Give the human the rename it names. Do not rename the file yourself. |
@@ -159,6 +216,48 @@ Each tracker has one server: a new `tkt serve`, from any terminal, stops the old
 - **Stop:** `tkt stop` works from anywhere.
 - **What the human can do there:** file, edit, comment on, close, and reopen tickets.
   Blockers and parents are command-line only.
+
+## Wiki
+
+The tracker's wiki holds the project pages agents keep current. Start every wiki task at
+`agents/Home`: it lists the pages and the rules for them.
+
+| Intent | Command |
+| --- | --- |
+| List pages | `tkt wiki ls`, or `tkt wiki ls templates` |
+| Read a page | `tkt wiki get <page>`; stderr gives its version |
+| Write a page | `tkt wiki put <page> --base <version> <<'EOF'` ... |
+| Start a page from a template | `tkt wiki cp templates/<Name> <Name>` |
+| Retire a page | `tkt wiki rm <page> --base <version>` |
+
+- Always `get` before `put`, and pass the version it printed as `--base`, so a human's edit made
+  in between is never overwritten. When `put` reports the page changed, `get` it again and redo
+  the edit on the new text.
+- `put` replaces the whole page. Carry forward everything that still holds, including the
+  page's *Conventions* section.
+- Never write `agents/` pages, which humans own. `--force` exists for when the human asks.
+- Use `cp` only from `templates/`. Fill the copy in; leave the template as it is.
+
+## Actions
+
+Project actions are commands the human can run from buttons in the web ui. `tkt action list`
+shows them; `tkt action run <name> [<id>]` runs one as its button does, streaming its log and
+exiting with its code. They need jq.
+
+- They come from the `actions` key of `.tkt.json` beside the tracker: json once its whole-line `//`
+  comments are dropped. Each is `{"name", "label", "icon", "command": [argv...], "comment"}`; `{ticket}`,
+  `{repo}`, and `{tkt}` (tkt's own path) are filled in, `icon` is a tabler icon name, and `comment: true`
+  posts the result to the ticket the run started from. The `config/Actions` wiki page is no longer read.
+- `"skill": ["groom"]` instead of a command runs the top-level `agent` argv with its `{prompt}` set to
+  `/tkt {ticket} groom`, so such a job may be you, running this skill.
+- An action whose command uses `{ticket}` is a ticket action and needs an id; any other is a
+  project action, where an id is optional and only says which ticket gets the comment.
+  `tkt action list` shows each one's scope.
+- Add or change actions only when the human asks: they run commands on their machine.
+  Never edit `.tkt.json` unasked.
+- `tkt action clean [--keep <n>]` retires old finished jobs to the temp dir; it deletes nothing.
+- Prefer an existing action over an ad-hoc command when it does what the human wants, so the
+  run lands in the same job history the web ui shows.
 
 ## Reporting
 

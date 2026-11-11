@@ -10,7 +10,7 @@ DOCS_REPO ?= mattvonrocketstein/tkt
 DOCS_PORT ?= 6419
 MDHEADERS = $(PYTHON) docs/tools/mdheaders.py --img $(DOCS_IMG)
 
-.PHONY: clean init build test install skill docs.headers docs.check docs.test docs.serve
+.PHONY: clean init build test install skill docs docs.headers docs.check docs.test docs.serve
 .SILENT:
 
 clean:
@@ -53,6 +53,9 @@ install:
 	     echo "or install system-wide instead:"; \
 	     echo "  sudo make install PREFIX=/usr/local" ;; \
 	esac
+
+# phony, or make would see the docs/ directory and call it up to date
+docs: docs.headers
 
 docs.headers:
 	$(MDHEADERS) $(DOCS_PAGES)
