@@ -1,0 +1,38 @@
+# Compile fossil as a fat ape from a clean tree and keep it as a workflow artifact; dev.yml calls this, then omni-pack.yml.
+name: Omni build
+on:
+  workflow_call: {}
+permissions:
+  contents: read
+jobs:
+  build:
+    name: Build fossil
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      # Every input is pinned by digest in omni/Makefile, so that file is the cache key; the fallback shares the toolchain across its edits.
+      - name: Cache downloads and toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            omni/*.tar.gz
+            omni/*.zip
+            omni/cosmocc
+          key: omni-deps-${{ runner.os }}-${{ hashFiles('omni/Makefile') }}
+          restore-keys: |
+            omni-deps-${{ runner.os }}-
+      - name: Fetch and verify inputs
+        run: make omni.deps
+      - name: Unpack
+        run: make omni.unpack
+      - name: Compile fossil
+        run: make -C omni build/fossil
+      # Fossil alone: omni-pack.yml copies it and the payload into amk, as make omni.repack does locally.
+      - name: Upload fossil
+        uses: actions/upload-artifact@v7
+        with:
+          name: tkt-fossil
+          path: omni/build/fossil
+          if-no-files-found: error
+          retention-days: 14

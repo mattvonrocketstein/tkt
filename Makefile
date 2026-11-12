@@ -2,15 +2,13 @@ PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 PYTHON ?= python3
 VENV ?= .venv
-SCRIPT ?= tkt
-SKILL ?= skills/tkt/SKILL.md
 DOCS_PAGES ?= README.md $(wildcard docs/*.md)
 DOCS_IMG ?= docs/img/hdr
 DOCS_REPO ?= mattvonrocketstein/tkt
 DOCS_PORT ?= 6419
 MDHEADERS = $(PYTHON) docs/tools/mdheaders.py --img $(DOCS_IMG)
 
-.PHONY: clean init build test install skill docs docs.headers docs.check docs.test docs.serve ape ape.%
+.PHONY: clean init test install install.slim docs docs.headers docs.check docs.test docs.serve omni omni.%
 .SILENT:
 
 clean:
@@ -24,34 +22,31 @@ $(VENV)/bin/pytest:
 	$(VENV)/bin/pip install --quiet pytest
 	echo "tkt: test env ready in $(VENV)"
 
-build: skill
-
 test: init
 	$(VENV)/bin/pytest -q tests/
 
-skill:
-	grep -q '^SKILL_MD$$' "$(SCRIPT)" || { echo "tkt: no skill copy found in $(SCRIPT)"; exit 1; }
-	awk -v src="$(SKILL)" \
-	  '/^SKILL_MD$$/ { skip = 0 } !skip { print } /<<.SKILL_MD.$$/ { while ((getline line < src) > 0) print line; skip = 1 }' \
-	  "$(SCRIPT)" > "$(SCRIPT).tmp"
-	if cmp -s "$(SCRIPT).tmp" "$(SCRIPT)"; then \
-	  echo "tkt: the skill copy in $(SCRIPT) already matches $(SKILL)"; \
-	else \
-	  cat "$(SCRIPT).tmp" > "$(SCRIPT)"; \
-	  echo "tkt: synced the skill copy in $(SCRIPT) from $(SKILL)"; \
-	fi
-	rm -f "$(SCRIPT).tmp"
+# install puts the omnibus on the host: one file with fossil, jq and bash inside, built first when it is not there yet
+install: omni/tkt
+install: installed := omni/tkt
+install: what := the omnibus
+# install.slim puts the script alone there, for a host that has fossil, jq and bash of its own
+install.slim: installed := tkt
+install.slim: what := the script alone
 
-install:
+omni/tkt:
+	echo "tkt: no omnibus built yet, building it; make install.slim installs the script alone" >&2
+	$(MAKE) -C omni tkt
+
+install install.slim:
 	install -d "$(BINDIR)"
-	install -m 0755 tkt "$(BINDIR)/tkt"
-	echo "tkt: installed $(BINDIR)/tkt"
+	install -m 0755 "$(installed)" "$(BINDIR)/tkt"
+	echo "tkt: installed $(BINDIR)/tkt, $(what)"
 	case ":$$PATH:" in \
 	  *":$(BINDIR):"*) ;; \
 	  *) echo "tkt: warning: $(BINDIR) is not on PATH. Add it in your shell profile:"; \
 	     echo "  export PATH=\"$(BINDIR):\$$PATH\""; \
 	     echo "or install system-wide instead:"; \
-	     echo "  sudo make install PREFIX=/usr/local" ;; \
+	     echo "  sudo make $@ PREFIX=/usr/local" ;; \
 	esac
 
 # phony, or make would see the docs/ directory and call it up to date
@@ -72,9 +67,9 @@ docs.serve:
 	echo "tkt: serving docs at http://localhost:$(DOCS_PORT)/" >&2
 	$(PYTHON) docs/tools/preview.py $(DOCS_REPO) $(DOCS_PORT)
 
-# tkt as an actually portable executable, fossil and the tkt script and .tkt in one file; the targets live in ape/Makefile, reached as ape.<target>.
-ape:
-	$(MAKE) -C ape tkt
+# the omnibus distribution: tkt, fossil and what tkt ships in .tkt as one portable file; the targets live in omni/Makefile, reached as omni.<target>.
+omni:
+	$(MAKE) -C omni tkt
 
-ape.%:
-	$(MAKE) -C ape $*
+omni.%:
+	$(MAKE) -C omni $*

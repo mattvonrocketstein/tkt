@@ -23,11 +23,6 @@ jobs:
         run: brew install fossil
 
       - run: make init
-      - run: make build
-
-      - name: Fail when build changed committed files
-        run: git diff --exit-code
-
       - run: make test
 
       - name: Test under the macOS system bash
@@ -36,7 +31,7 @@ jobs:
 
       - name: Install and smoke
         run: |
-          make install
+          make install.slim
           "$HOME/.local/bin/tkt" version
 
       - run: make clean

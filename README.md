@@ -56,6 +56,12 @@ curl -fsSL -o ~/.local/bin/tkt \
 chmod +x ~/.local/bin/tkt
 
 # Or, from a clone of this repo
+make install.slim
+```
+
+The omnibus is the other way to install: one file with fossil, jq and bash inside, for a host that has none of them.  It is built from a clone, with [amk](https://github.com/Robot-Wranglers/ape-make) on your path.  `make install` builds it first when it is not there yet; `make omni` rebuilds it from a clean tree.
+
+```bash
 make install
 ```
 
@@ -94,6 +100,8 @@ When the project already has a `.claude/` (Claude Code), `.pi/` (pi), or `.agent
 | `TKT_DB` | The nearest `.tkt.fossil` | Tracker file |
 | `TKT_USER` | `$USER` | Admin user created by `init` |
 | `TKT_PORT` | `9080` | Port for `serve`; the environment wins, else a `TKT_PORT=` line in `.env` beside the tracker |
+| `TKT_EXT_PATH` | Unset | More folders to find plugins in, colon-separated, each shaped like `.tkt` (`ext/`, `data/`, `sql/`, `skill/`). They are searched in order after the tracker's own `.tkt`, and the first folder that has a plugin wins |
+| `TKT_PATH` | Unset | Directories put first on `PATH` when fossil runs tkt for the web ui, for a distribution that carries its own tools |
 | `NO_COLOR`, `NOCOLOR` | Unset | Any value turns off color on a terminal |
 
 <a id="existing-repos"></a>
@@ -168,6 +176,7 @@ For the browser, see [Web UI](#web-ui).
 | `tkt sql <query>` | Read-only sql over the tracker, printed as a markdown table; the query can also come on stdin |
 | `tkt sql --schema` | The ticket tables, their conventions, and example queries |
 | `tkt serve [port=...]` | The web ui, in the foreground, replacing any server this tracker already has |
+| `tkt start [port=...]` | The same web ui, left running in the background; prints its url and returns |
 | `tkt stop` | Stop the tracker's server, from any terminal |
 | `tkt status` | Print the server's url, or fail when none is running |
 | `tkt wiki ls [prefix]` | Wiki pages as a markdown table, optionally only those under `prefix/`; alias `list` |
@@ -306,10 +315,11 @@ The port comes from the first of these that is set: `port=` on the command line,
 echo 'TKT_PORT=9081' >> .env
 ```
 
-To keep it running without a terminal, background it yourself:
+To keep it running without a terminal, use `tkt start`. It starts the same server apart from the terminal, waits until it answers, prints the url and returns; `tkt status` and `tkt stop` work on it as on any other. When the server does not come up, it prints what `serve` said and fails.
 
-```bash
-nohup tkt serve >/dev/null 2>&1 &
+```text
+$ tkt start
+http://localhost:9080/ticket
 ```
 
 <a id="actions"></a>
@@ -415,7 +425,7 @@ Most of the things in [Why](#why) are `fossil ticket` traps that report success,
 
 ### Claude Code Skill
 
-See [skills/tkt/SKILL.md](skills/tkt/SKILL.md), teaching Claude Code how to use `tkt`.  It covers the basics above, plus preferred ticket structure, when to rewrite versus comment, when a ticket may be closed, and how to start the web ui if needed.  The skill ships inside `tkt`, so installing it needs no clone and no second download:
+`tkt skill` prints a skill teaching Claude Code how to use `tkt`.  It covers the basics above, plus preferred ticket structure, when to rewrite versus comment, when a ticket may be closed, and how to start the web ui if needed.  The skill ships inside `tkt`, so installing it needs no clone and no second download:
 
 Install `tkt` as in [Install](#install), then confirm it runs:
 
@@ -452,10 +462,10 @@ For a `--project` install, use `{ "skills": ["../.claude/skills"] }` in `.pi/set
 | Target | Effect |
 | --- | --- |
 | `make init` | Create `.venv` with pytest; skipped when it already exists |
-| `make build` | Run `make skill`; the script itself needs no build step |
 | `make test` | Run the suite in `tests/`, after `init` |
-| `make install` | Copy `tkt` to `BINDIR`, `~/.local/bin` by default |
-| `make skill` | Copy `skills/tkt/SKILL.md` into `tkt`, so `tkt skill` prints the current version |
+| `make omni` | Build the omnibus, `omni/tkt`, from a clean tree; `make omni.<target>` runs one target of `omni/Makefile` |
+| `make install` | Copy the omnibus to `BINDIR` as `tkt`, `~/.local/bin` by default; builds it first when `omni/tkt` is not there yet |
+| `make install.slim` | Copy the `tkt` script alone to `BINDIR` |
 | `make clean` | Remove the pytest and bytecode caches; `.venv` stays |
 | `make docs.headers` | Regenerate the README section headers and their images in `docs/img/hdr` |
 | `make docs.check` | Fail when a section header or its images are out of date; writes nothing |
@@ -470,7 +480,7 @@ TKT_BASH=/bin/bash make test
 
 The GitHub workflow in `.github/workflows/test.yml` runs the same targets on Linux and macOS.
 
-The skill lives in two places: `skills/tkt/SKILL.md`, and a copy inside `tkt` that `tkt skill` prints. Edit `skills/tkt/SKILL.md`, then run `make skill` to update the copy. `make test` fails when they differ.
+The skill lives in one place, inside `tkt`, in the `skill_core` function; `tkt skill` prints it. Edit it there. The script itself needs no build step.
 
 <!-- header why "Why" | The Big One #the-big-one | The Other Ones #the-other-ones -->
 <h2><a id="why"></a>Why<a href="#the-other-ones"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.why.1.dark.svg"><img align=right src="docs/img/hdr/readme.why.1.svg" alt="The Other Ones"></picture></a><a href="#the-big-one"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/hdr/readme.why.0.dark.svg"><img align=right src="docs/img/hdr/readme.why.0.svg" alt="The Big One"></picture></a><br clear="all"></h2>

@@ -1,0 +1,20 @@
+# Every push to dev: compile fossil once, pack it with tkt and what tkt ships into the pinned amk, then test the result on every host.
+name: Dev
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ "dev" ]
+    paths-ignore: ['**.md', '**.png', '**.svg']
+permissions:
+  contents: read
+jobs:
+  build:
+    uses: ./.github/workflows/omni-build.yml
+
+  pack:
+    needs: build
+    uses: ./.github/workflows/omni-pack.yml
+
+  test:
+    needs: pack
+    uses: ./.github/workflows/omni-test.yml

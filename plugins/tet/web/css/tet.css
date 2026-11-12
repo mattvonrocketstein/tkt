@@ -1,0 +1,20 @@
+#tet .tkt-card-body { overflow-x: auto; }
+#tet table.report { width: 100%; }
+#tet td code { white-space: pre-wrap; word-break: break-word; }
+#tet td details summary { cursor: pointer; }
+#tet td details pre { white-space: pre-wrap; max-width: 60ch; margin: 4px 0 0; }
+.tet-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 8px 10px; }
+.tet-bar form { margin: 0 0 0 auto; }
+.tet-count { color: #6a737d; font-size: 0.9em; }
+.tet-empty { margin: 8px 10px; color: #6a737d; }
+td.tet-decide { white-space: nowrap; }
+td.tet-decide button { margin-right: 4px; }
+td.tet-decide button.tet-on { font-weight: bold; box-shadow: inset 0 0 0 2px currentColor; }
+#tet tr[data-decision=accept] { background-color: rgba(46,160,67,.12); }
+#tet tr[data-decision=reject] { background-color: rgba(218,54,51,.10); }
+.tet-state { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 0.85em; }
+.tet-state-applied { background-color: rgba(46,160,67,.18); }
+.tet-state-failed { background-color: rgba(218,54,51,.22); font-weight: bold; }
+.tet-state-rejected { background-color: rgba(110,118,129,.18); }
+#tet tr.tet-just { animation: tet-settle 2.5s ease-out; }
+@keyframes tet-settle { from { background-color: rgba(255,200,0,.35); } to { background-color: transparent; } }

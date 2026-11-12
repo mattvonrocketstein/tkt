@@ -1,0 +1,33 @@
+# Copy this checkout's payload and the fossil omni-build.yml kept into the pinned amk, smoke the result, and keep it; dev.yml calls this, then omni-test.yml.
+name: Omni pack
+on:
+  workflow_call: {}
+permissions:
+  contents: read
+jobs:
+  pack:
+    name: Pack tkt
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Download fossil
+        uses: actions/download-artifact@v8
+        with:
+          name: tkt-fossil
+          path: omni/build
+      - name: Restore the exec bit
+        run: chmod +x omni/build/fossil
+      # The amk release and its digest are pinned in omni/Makefile; this fetches that one file and checks it.
+      - name: Fetch the pinned amk
+        run: make omni.amk
+      # The -o flag keeps make from recompiling fossil, which this job has no toolchain for.
+      - name: Pack and smoke
+        run: make -C omni -o build/fossil repack smoke
+      - name: Upload tkt
+        uses: actions/upload-artifact@v7
+        with:
+          name: tkt-omni
+          path: omni/out/tkt
+          if-no-files-found: error
+          retention-days: 14

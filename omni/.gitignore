@@ -1,0 +1,9 @@
+# Pinned downloads and the toolchain unpacked from one; make deps fetches them again.
+*.tar.gz
+*.zip
+*.ape
+/cosmocc/
+# Build trees and outputs; make clean drops them.
+/build/
+/out/
+/tkt

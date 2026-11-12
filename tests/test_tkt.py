@@ -24,6 +24,16 @@ FOSSIL = shlex.split(os.environ.get("TKT_FOSSIL", "fossil"))
 script_only = pytest.mark.skipif(bool(os.environ.get("TKT_CMD")), reason="reaches inside the tkt script; TKT_CMD names a distribution")
 # a distribution carries its own fossil, so the host's is linked only when there is one
 TOOLS = [t for t in "fossil sed mktemp mkdir mv rm dirname basename ps grep sleep cat sh".split() if shutil.which(t)]
+# what a plugin's init and a distribution's own start need besides
+TOOLS += [t for t in "ln find sort readlink cmp chmod".split() if shutil.which(t)]
+
+
+def names_this_tkt(path):
+    """Whether a path tkt gave out as itself is the tkt under test: the script exactly, or for a distribution, which may
+    name a launcher beside its binary, any file that runs as it."""
+    if not os.environ.get("TKT_CMD"):
+        return Path(path).resolve() == SELF
+    return subprocess.run([str(path), "version"], capture_output=True, text=True).stdout == run("version").stdout
 
 
 def run(*args, db=None, input="", cwd=None, path=None, extra=None):
@@ -112,25 +122,21 @@ def tkt(template, tmp_path):
     return Tracker(db, tmp_path)
 
 
-# this repository's own .tkt/, where the plugins and their files live
-PLUGINS = SCRIPT.parent / ".tkt"
+# the plugins tkt ships, in this repository's plugins folder: one folder each, holding everything the plugin owns
+PLUGINS = SCRIPT.parent / "plugins"
 
 
-# lay out plugins beside a tracker as a project has them: .tkt/ext/<name> with the link to tkt, and each one's
-# .tkt/sql/<name>, .tkt/skill/<name>.md, and the shared .tkt/data. a later tkt init then runs their inits
-def install_plugins(root, *names):
-    dot = root / ".tkt"
-    (dot / "ext").mkdir(parents=True, exist_ok=True)
-    if not (dot / "ext" / "tkt").exists():
-        (dot / "ext" / "tkt").symlink_to(SCRIPT)
+# lay out plugins beside a tracker as a project has its own, one folder each under the plugins folder of .tkt, with tkt beside them
+def install_plugins(root, *names, always=False):
+    # a distribution carries these plugins itself, and its own copies are the ones to test
+    if os.environ.get("TKT_CMD") and not always:
+        return
+    plugins = root / ".tkt" / "plugins"
+    plugins.mkdir(parents=True, exist_ok=True)
+    if not (plugins / "tkt").exists():
+        (plugins / "tkt").symlink_to(SCRIPT)
     for name in names:
-        shutil.copytree(PLUGINS / "ext" / name, dot / "ext" / name, dirs_exist_ok=True)
-        if (PLUGINS / "sql" / name).is_dir():
-            shutil.copytree(PLUGINS / "sql" / name, dot / "sql" / name, dirs_exist_ok=True)
-        if (PLUGINS / "skill" / f"{name}.md").is_file():
-            (dot / "skill").mkdir(exist_ok=True)
-            shutil.copy(PLUGINS / "skill" / f"{name}.md", dot / "skill" / f"{name}.md")
-    shutil.copytree(PLUGINS / "data", dot / "data", dirs_exist_ok=True)
+        shutil.copytree(PLUGINS / name, plugins / name, dirs_exist_ok=True)
 
 
 @pytest.fixture
@@ -161,7 +167,7 @@ def config(db, name):
 class TestSurface:
     def test_help_lists_every_verb(self):
         out = run("help").stdout
-        for verb in "init new show list search todo triage edit comment tag block parent set close serve stop status sql action skill run".split():
+        for verb in "init new show list search todo triage edit comment tag block parent set close serve start stop status sql action skill run".split():
             assert f"tkt {verb}" in out
 
     def test_unknown_verb_fails(self):
@@ -1067,17 +1073,138 @@ class TestLibrary:
         assert run("bogus-verb", db=tkt.db).returncode != 0
 
 
-class TestSkill:
-    SOURCE = SCRIPT.parent / "skills" / "tkt" / "SKILL.md"
+class TestPluginEntry:
+    def ext(self, tkt, name):
+        d = tkt.db.parent / ".tkt" / "plugins" / name
+        d.mkdir(parents=True)
+        return d
 
-    def test_bundled_copy_matches_repository(self, tmp_path):
-        # outside any project, so no plugin adds a section to tkt's own part
-        assert run("skill", cwd=tmp_path).stdout == self.SOURCE.read_text()
+    def test_an_entry_file_runs_under_what_its_extension_names(self, tkt):
+        # no first line naming an interpreter and no exec bit: the extension alone says what runs it
+        entry = self.ext(tkt, "echo") / "main.sh"
+        entry.write_text('printf "%s|" "$0" "$TKT_DB" "$@"\n')
+        assert tkt.ok("echo", "a b", "c") == f"{entry}|{tkt.db}|a b|c|"
+
+    def test_a_plugin_exits_with_its_own_code(self, tkt):
+        (self.ext(tkt, "three") / "main.sh").write_text("exit 3\n")
+        assert tkt("three").returncode == 3
+
+    def test_a_plugin_without_an_entry_file_is_an_error(self, tkt):
+        self.ext(tkt, "hollow")
+        tkt.fails("hollow", match=r"plugin hollow has no entry file: .*/\.tkt/plugins/hollow holds no main with a supported extension \(sh\)")
+
+    def test_an_entry_file_without_an_extension_is_not_one(self, tkt):
+        legacy = self.ext(tkt, "legacy") / "main"
+        legacy.write_text("#!/bin/sh\necho ran\n")
+        legacy.chmod(0o755)
+        tkt.fails("legacy", match="plugin legacy has no entry file")
+
+    def test_init_reports_a_plugin_without_an_entry_file_and_carries_on(self, tkt):
+        self.ext(tkt, "hollow")
+        r = tkt("init")
+        assert r.returncode == 0, r.stderr
+        assert "plugin hollow has no entry file" in r.stderr and "1 plugin init(s) failed" in r.stderr
+
+
+class TestOldPluginLayout:
+    def test_init_moves_a_plugin_and_its_files_into_one_folder(self, tkt):
+        dot = tkt.db.parent / ".tkt"
+        (dot / "ext" / "old" / "css").mkdir(parents=True)
+        (dot / "ext" / "old" / "main").write_text('echo "old $*"\n')
+        (dot / "ext" / "old" / "css" / "old.css").write_text("a{}\n")
+        (dot / "ext" / "tkt").symlink_to(SCRIPT)
+        (dot / "sql" / "old").mkdir(parents=True)
+        (dot / "sql" / "old" / "schema.sql").write_text("-- old\n")
+        (dot / "skill").mkdir()
+        (dot / "skill" / "old.md").write_text("## Old\n")
+        r = tkt("init")
+        assert r.returncode == 0 and f"moved the plugin old to {dot / 'plugins' / 'old'}" in r.stderr
+        new = dot / "plugins" / "old"
+        assert (new / "main.sh").is_file() and (new / "web" / "css" / "old.css").is_file()
+        assert (new / "sql" / "schema.sql").is_file() and (new / "skill.md").is_file()
+        # fossil's folder is left with the link to tkt alone, and the emptied folders are gone
+        assert [p.name for p in (dot / "ext").iterdir()] == ["tkt"]
+        assert not (dot / "sql").exists() and not (dot / "skill").exists()
+        assert tkt.ok("old", "x") == "old x\n"
+
+
+class TestPluginPath:
+    """TKT_EXT_PATH names more folders of plugins, searched after the tracker's own, in order."""
+
+    def home(self, tmp_path, name, **plugins):
+        home = tmp_path / name
+        for plugin, says in plugins.items():
+            (home / plugin).mkdir(parents=True)
+            (home / plugin / "main.sh").write_text(f'echo "{says} $*"\n')
+        return home
+
+    def test_a_plugin_is_found_in_a_folder_on_the_path(self, tkt, tmp_path):
+        far = self.home(tmp_path, "far", greet="far")
+        assert run("greet", "you", db=tkt.db, extra={"TKT_EXT_PATH": str(far)}).stdout == "far you\n"
+        tkt.fails("greet", match="unknown verb: greet")
+
+    def test_the_trackers_own_plugin_wins(self, tkt, tmp_path):
+        far = self.home(tmp_path, "far", greet="far")
+        self.home(tkt.db.parent / ".tkt", "plugins", greet="own")
+        assert run("greet", db=tkt.db, extra={"TKT_EXT_PATH": str(far)}).stdout == "own \n"
+
+    def test_earlier_folders_win_and_empty_or_missing_ones_are_skipped(self, tkt, tmp_path):
+        a, b = self.home(tmp_path, "a", greet="a"), self.home(tmp_path, "b", greet="b", only="b")
+        path = f":{tmp_path / 'nowhere'}:{a}::{b}:"
+        assert run("greet", db=tkt.db, extra={"TKT_EXT_PATH": path}).stdout == "a \n"
+        assert run("only", db=tkt.db, extra={"TKT_EXT_PATH": path}).stdout == "b \n"
+
+    def test_a_directory_without_an_entry_does_not_hide_a_later_plugin(self, tkt, tmp_path):
+        far = self.home(tmp_path, "far", greet="far")
+        (tkt.db.parent / ".tkt" / "plugins" / "greet" / "web" / "icons").mkdir(parents=True)
+        assert run("greet", db=tkt.db, extra={"TKT_EXT_PATH": str(far)}).stdout == "far \n"
+
+    def test_a_plugins_files_are_the_ones_beside_it(self, tmp_path):
+        install_plugins(tmp_path / "shipped", "tet", "wiki", always=True)
+        extra = {"TKT_EXT_PATH": str(tmp_path / "shipped" / ".tkt" / "plugins")}
+        project = tmp_path / "project"
+        project.mkdir()
+        db = project / "tracker.fossil"
+        r = run("init", db=db, extra=extra)
+        assert r.returncode == 0, r.stderr
+        assert "init tet: ok" in r.stderr and "init wiki: ok" in r.stderr
+        # the wiki's seed pages and tet's schema came from the folder the plugins are in, and nothing was copied here
+        assert "agents/Home" in run("wiki", "ls", db=db, extra=extra).stdout
+        assert run("tet", "list", db=db, extra=extra).returncode == 0
+        assert not (project / ".tkt" / "plugins").exists() and not (project / ".tkt" / "bin").exists()
+        assert "\n## Plugins\n" in run("skill", cwd=project, extra={**extra, "TKT_DB": str(db)}).stdout
+
+
+class TestSkill:
+    # how tkt's own part of the skill opens: the front matter an agent reads to decide when to load it
+    OPENING = "---\nname: tkt\ndescription: "
+
+    def test_prints_its_own_part_outside_a_project(self, tmp_path):
+        printed = run("skill", cwd=tmp_path).stdout
+        assert printed.startswith(self.OPENING) and "allowed-tools: Bash(tkt:*)" in printed
+        assert "tkt start" in self.own_part(printed)
+        # outside any project no plugin adds a section, unless the tkt under test carries plugins of its own
+        assert os.environ.get("TKT_CMD") or "\n## Plugins\n" not in printed
+
+    def own_part(self, printed):
+        return printed.split("\n## Plugins\n")[0]
 
     def test_install_for_user(self, tmp_path):
         r = run("skill", "install", extra={"HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": ""})
         assert r.returncode == 0, r.stderr
-        assert (tmp_path / ".claude" / "skills" / "tkt" / "SKILL.md").read_text() == self.SOURCE.read_text()
+        # the copy for every project is what tkt prints outside any one project
+        installed = (tmp_path / ".claude" / "skills" / "tkt" / "SKILL.md").read_text()
+        assert installed == run("skill", cwd=tmp_path).stdout
+
+    def test_install_for_user_carries_the_plugins_on_the_search_path(self, tmp_path):
+        far = tmp_path / "far"
+        (far / "greet").mkdir(parents=True)
+        (far / "greet" / "main.sh").write_text("echo hi\n")
+        (far / "greet" / "skill.md").write_text("## Greet\n\nSay hi.\n")
+        r = run("skill", "install", extra={"HOME": str(tmp_path / "h"), "CLAUDE_CONFIG_DIR": "", "TKT_EXT_PATH": str(far)})
+        assert r.returncode == 0, r.stderr
+        installed = (tmp_path / "h" / ".claude" / "skills" / "tkt" / "SKILL.md").read_text()
+        assert "\n## Plugins\n" in installed and "\n### Greet\n\nSay hi.\n" in installed
 
     def test_install_honors_claude_config_dir(self, tmp_path):
         r = run("skill", "install", extra={"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")})
@@ -1110,8 +1237,11 @@ class TestSkill:
         (project / ".agents").mkdir()
         r = run("init", cwd=project)
         assert r.returncode == 0, r.stderr
+        # a project's copy is what tkt prints there: its own part, then a section per installed plugin
+        printed = run("skill", cwd=project).stdout
+        assert printed.startswith(self.OPENING)
         for agent in (".claude", ".pi", ".agents"):
-            assert (project / agent / "skills" / "tkt" / "SKILL.md").read_text() == self.SOURCE.read_text()
+            assert (project / agent / "skills" / "tkt" / "SKILL.md").read_text() == printed
             assert f"found {agent}/, installed {agent}/skills/tkt/SKILL.md" in r.stderr
         r = run("init", cwd=project)
         assert "already current" in r.stderr
@@ -1122,7 +1252,9 @@ class TestSkill:
         r = run("init", cwd=project)
         assert r.returncode == 0, r.stderr
         assert "updated .claude/skills/tkt/SKILL.md" in r.stderr
-        assert (project / ".claude" / "skills" / "tkt" / "SKILL.md").read_text() == self.SOURCE.read_text()
+        printed = run("skill", cwd=project).stdout
+        assert printed.startswith(self.OPENING)
+        assert (project / ".claude" / "skills" / "tkt" / "SKILL.md").read_text() == printed
 
     def test_unknown_argument_fails(self):
         r = run("skill", "uninstall")
@@ -1169,6 +1301,39 @@ class TestServer:
         assert "nothing serving" in r.stderr
 
     def test_status_fails_with_nothing_serving(self, tkt):
+        tkt.fails("status", match="nothing serving")
+
+    def test_start_serves_in_the_background_until_stop(self, tkt):
+        import socket
+        import urllib.request
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        url = f"http://localhost:{port}/ticket"
+        r = tkt("start", f"port={port}")
+        try:
+            assert r.returncode == 0, r.stderr
+            assert r.stdout == url + "\n"
+            assert "in the background" in r.stderr
+            assert tkt.ok("status") == url + "\n"
+            assert urllib.request.urlopen(url, timeout=10).status == 200
+            again = tkt("start", f"port={port}")
+            assert again.returncode == 0 and "stopped the server" not in again.stdout
+            assert tkt.ok("status") == url + "\n"
+        finally:
+            assert "stopped the server" in tkt("stop").stderr
+        tkt.fails("status", match="nothing serving")
+
+    def test_start_says_why_the_server_did_not_come_up(self, tkt):
+        import socket
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen()
+            r = tkt("start", f"port={s.getsockname()[1]}")
+        assert r.returncode != 0
+        assert "is taken" in r.stderr and "the server did not start" in r.stderr
         tkt.fails("status", match="nothing serving")
 
     def test_stale_pid_file_is_ignored(self, tkt):
@@ -1223,7 +1388,7 @@ def put_actions(tkt, actions):
     (tkt.db.parent / ".tkt.json").write_text("// a comment\n  // an indented one\n" + json.dumps({"actions": actions}, indent=2) + "\n")
 
 
-def cgi(tkt, path="", query="", body="", method=None, referer="http://localhost:1/tktview/x", shell=None):
+def cgi(tkt, path="", query="", body="", method=None, referer="http://localhost:1/tktview/x", shell=None, extra=None):
     """One request to tkt as fossil's /ext CGI runs it: no arguments, the request in the environment and on stdin."""
     env = {
         "GATEWAY_INTERFACE": "CGI/1.0",
@@ -1238,6 +1403,7 @@ def cgi(tkt, path="", query="", body="", method=None, referer="http://localhost:
         "CONTENT_LENGTH": str(len(body)),
         "FOSSIL_USER": os.environ.get("TKT_USER", os.environ.get("USER", "")),
     }
+    env.update(extra or {})
     r = subprocess.run([shell or BASH, str(SCRIPT)], input=body, capture_output=True, text=True, env=env, cwd=tkt.db.parent)
     head, _, page = r.stdout.replace("\r\n", "\n").partition("\n\n")
     headers = dict(line.split(": ", 1) for line in head.splitlines())
@@ -1339,6 +1505,8 @@ class TestActions:
         assert "not a count" in tkt("action", "clean", "--keep", "x").stderr
 
     def test_needs_jq(self, tkt, no_git_path):
+        if os.environ.get("TKT_CMD"):
+            pytest.skip("a distribution carries its own jq")
         r = run("action", "list", db=tkt.db, path=no_git_path)
         assert r.returncode != 0 and "actions need jq" in r.stderr
 
@@ -1406,12 +1574,12 @@ class TestActions:
 
     def test_tkt_placeholder_is_this_script(self, tkt):
         self.put(tkt, {"name": "self", "command": ["echo", "{tkt}"]})
-        assert tkt.ok("action", "run", "self").strip() == str(SELF)
+        assert names_this_tkt(tkt.ok("action", "run", "self").strip())
 
     def test_plain_tkt_in_a_job_is_this_one(self, tkt):
         self.put(tkt, {"name": "which", "command": ["sh", "-c", "command -v tkt; tkt version"]})
         found, version = tkt.ok("action", "run", "which").splitlines()
-        assert found == str(tkt.db.parent / ".tkt" / "ext" / "tkt") and Path(found).resolve() == SELF
+        assert found == str(tkt.db.parent / ".tkt" / "ext" / "tkt") and names_this_tkt(found)
         assert version.startswith("tkt ")
 
     def test_tkt_inside_a_job_says_so(self, tkt):
@@ -1457,7 +1625,8 @@ class TestActionsCgi:
     def test_buttons_are_bare(self, tkt, ticket):
         h, page = cgi(tkt, "/buttons", f"ticket={ticket}")
         assert "fossil-doc" not in page
-        assert page.startswith('<div class="tkt-actions">') and page.count("<button ") == 3
+        # the row a ticket's page fetches holds ticket actions only; project actions stay on the actions page
+        assert page.startswith('<div class="tkt-actions">') and page.count("<button ") == 1 and "Say &lt;hi&gt;" in page
 
     def test_no_actions_no_buttons(self, tkt):
         _, page = cgi(tkt, "/buttons", "ticket=")
@@ -1520,8 +1689,10 @@ class TestActionsCgi:
         assert page.count("<button ") == 2 and ">Say" not in page
         assert "From a ticket&rsquo;s page: Say &lt;hi&gt;." in page
         _, page = cgi(tkt, "/buttons", "ticket=")
-        assert page.count("<button ") == 2
+        assert page == ""
         _, page = cgi(tkt, "/buttons", f"ticket={ticket}")
+        assert page.count("<button ") == 1 and ">Say" in page
+        _, page = cgi(tkt, query=f"ticket={ticket}")
         assert page.count("<button ") == 3
 
     def test_a_ticket_action_refuses_no_ticket(self, tkt, ticket):
@@ -1628,7 +1799,7 @@ class TestActionsServed:
                     if s.connect_ex(("127.0.0.1", port)) == 0:
                         break
                 time.sleep(0.1)
-            assert Path(str(tkt.db.parent / ".tkt" / "ext" / "tkt")).resolve() == SELF
+            assert names_this_tkt(tkt.db.parent / ".tkt" / "ext" / "tkt")
             page = urllib.request.urlopen(f"{base}/ext/tkt?ticket={id}").read().decode()
             assert "<title>" in page and "<button title=\"Hi\">Hi</button>" in page
             req = urllib.request.Request(f"{base}/ext/tkt/run/hi", data=f"ticket={id}".encode(), headers={"Referer": f"{base}/tktview/{id}"})
@@ -1643,11 +1814,75 @@ class TestActionsServed:
             tkt.ok("stop")
 
 
-@pytest.mark.skipif(shutil.which("jq") is None, reason="actions need jq")
+class TestPluginWeb:
+    """tkt's own web handler serves a plugin's page and files from wherever the search finds the plugin."""
+
+    PAGE = 'printf "Content-Type: text/plain\\r\\n\\r\\n%s|%s|%s|%s" "$SCRIPT_NAME" "$PATH_INFO" "$GATEWAY_INTERFACE" "$(cat)"\n'
+
+    def plugin(self, plugins, name="echo", entry=PAGE):
+        d = plugins / name
+        (d / "web").mkdir(parents=True, exist_ok=True)
+        if entry:
+            (d / "main.sh").write_text(entry)
+        return d
+
+    def own(self, tkt):
+        return tkt.db.parent / ".tkt" / "plugins"
+
+    def test_a_page_runs_with_its_own_address_path_and_body(self, tkt):
+        self.plugin(self.own(tkt))
+        h, page = cgi(tkt, "/ext/echo/main.sh/sub/path", body="posted")
+        assert h["Content-Type"] == "text/plain"
+        assert page == "/ext/tkt/ext/echo/main.sh|/sub/path|CGI/1.0|posted"
+        assert cgi(tkt, "/ext/echo")[1] == "/ext/tkt/ext/echo||CGI/1.0|"
+
+    def test_a_static_file_is_served_with_its_type(self, tkt):
+        d = self.plugin(self.own(tkt))
+        (d / "web" / "css").mkdir()
+        (d / "web" / "css" / "x.css").write_text("a{}\n")
+        h, page = cgi(tkt, "/ext/echo/css/x.css")
+        assert h["Content-Type"] == "text/css; charset=utf-8" and page == "a{}\n"
+
+    def test_only_the_web_folder_has_an_address(self, tkt):
+        d = self.plugin(self.own(tkt))
+        (d / "sql").mkdir()
+        (d / "sql" / "schema.sql").write_text("create table t(x);\n")
+        (d / "skill.md").write_text("## Echo\n")
+        for path in ("/ext/echo/sql/schema.sql", "/ext/echo/skill.md", "/ext/echo/web/x", "/ext/echo/main"):
+            h, page = cgi(tkt, path)
+            assert h["Status"] == "404" and "create table" not in page and "Echo" not in page, path
+
+    def test_pages_and_files_come_from_the_search_path_and_the_trackers_own_win(self, tkt, tmp_path):
+        far = self.plugin(tmp_path / "far")
+        (far / "web" / "a.txt").write_text("far a\n")
+        (far / "web" / "b.txt").write_text("far b\n")
+        own = self.plugin(self.own(tkt), entry=None)
+        (own / "web" / "b.txt").write_text("own b\n")
+        extra = {"TKT_EXT_PATH": str(tmp_path / "far")}
+        assert cgi(tkt, "/ext/echo/main.sh", extra=extra)[1].startswith("/ext/tkt/ext/echo/main.sh|")
+        assert cgi(tkt, "/ext/echo/a.txt", extra=extra)[1] == "far a\n"
+        assert cgi(tkt, "/ext/echo/b.txt", extra=extra)[1] == "own b\n"
+
+    def test_refusals(self, tkt):
+        self.plugin(self.own(tkt))
+        self.plugin(self.own(tkt), name="hollow", entry=None)
+        for path, status, says in (
+            ("/ext/nope/main.sh", "404", "no plugin nope"),
+            ("/ext/tkt/main.sh", "404", "no plugin tkt"),
+            ("/ext/echo/missing.css", "404", "no file missing.css in plugin echo"),
+            ("/ext/echo/../../tkt.json", "400", "bad path"),
+            ("/ext/hollow/main.sh", "404", "plugin hollow has no entry file"),
+        ):
+            h, page = cgi(tkt, path)
+            assert h["Status"] == status and says in page, path
+
+
 class TestActionIcons:
+    pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="actions need jq")
+
     def test_icon_is_a_cdn_image_beside_a_titled_label(self, tkt):
         put_actions(tkt, [{"name": "go", "label": "Go & run", "icon": "player-play", "command": ["true"]}])
-        _, page = cgi(tkt, "/buttons")
+        _, page = cgi(tkt)
         assert '<button title="Go &amp; run"><img class="tkt-action-icon" src="https://cdn.jsdelivr.net/npm/@tabler/icons@' in page
         assert '/outline/player-play.svg" alt="" width="16" height="16">Go &amp; run</button>' in page
 

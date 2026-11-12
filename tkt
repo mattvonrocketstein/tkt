@@ -10,6 +10,9 @@
 TKT_SOURCED=
 (return 0 2>/dev/null) && TKT_SOURCED=1
 [ -n "$TKT_SOURCED" ] || set -eo pipefail
+# this file's own path, which tkt hands to each plugin it runs so the plugin can source it back
+TKT_FILE=${BASH_SOURCE[0]}
+case "$TKT_FILE" in /*) ;; *) TKT_FILE=$PWD/$TKT_FILE ;; esac
 
 TKT_VERSION=0.1.0
 FIELDS='tags blockers parent description'
@@ -96,10 +99,11 @@ tkt: a ticket tracker over fossil, with a mutable body.
                                         code fences are highlighted by prism, TKT_HIGHLIGHT=0 to leave it out;
                                         ```mermaid fences draw as diagrams on pages that have one, TKT_MERMAID=0 to leave it out.
                                         init stores both in the tracker for offline use, else pages load them from cdnjs
-  tkt stop                              stop the server started by serve
+  tkt start [port=...]                  the same web ui, left running in the background; prints its url and returns
+  tkt stop                              stop the server started by serve or start
   tkt status                            print the server url and pid, or fail
   tkt sql <query> | --schema            read-only sql, as markdown; stdin works too
-  tkt <plugin> [args...]                run an installed plugin, .tkt/ext/<plugin>/main, on this tracker; for
+  tkt <plugin> [args...]                run an installed plugin, .tkt/plugins/<plugin>/main.sh, on this tracker; for
                                         example tkt wiki ls|get|put|rm|cp
   tkt action list                       project actions, from the actions key of .tkt/tkt.json beside the tracker;
                                         // comment lines are allowed; tkt init writes a default; needs jq
@@ -152,10 +156,9 @@ use_repo() {
   JOBS_DIR=$TKT_DIR/jobs                # one directory per action run
   PID_FILE=$TKT_DIR/tkt.pid             # the running server's pid and port
   DOTENV_FILE=$PROJECT_DIR/.env         # TKT_PORT; read, never sourced
-  HOME_DIR=${TKT_HOME:-$TKT_DIR}        # what tkt ships, below; the tkt binary names its own copy in TKT_HOME
-  EXT_DIR=$HOME_DIR/ext                 # fossil's extroot, holding a link to this script and one dir per extension
-  BIN_DIR=$HOME_DIR/bin                 # a link per extension to its main, made by init
-  DATA_DIR=$HOME_DIR/data               # content init seeds, by kind: wiki/<page>.md
+  EXT_DIR=$TKT_DIR/ext                  # fossil's extroot, holding only a link to this script: fossil's one door
+  PLUGINS_DIR=$TKT_DIR/plugins          # this tracker's own plugins, one folder each; first on the search for plugins
+  BIN_DIR=$TKT_DIR/bin                  # a link per plugin of this tracker's own to its main, made by init
 }
 
 # for a plugin that sources tkt: its name and the paths that hang off it. the name is the directory holding the
@@ -164,12 +167,16 @@ use_repo() {
 plugin_use() {
   local self=$0
   case "$self" in */*) ;; *) self=$(command -v "$self") ;; esac
-  PLUGIN_NAME=${1:-$(basename "$(dirname "$(readlink -f "$self" 2>/dev/null || printf '%s' "$self")")")}
-  PLUGIN_DIR=$EXT_DIR/$PLUGIN_NAME      # main, and what fossil serves for it
-  PLUGIN_JS=$PLUGIN_DIR/js
-  PLUGIN_CSS=$PLUGIN_DIR/css
-  PLUGIN_SQL=$HOME_DIR/sql/$PLUGIN_NAME # not under ext, so fossil never serves it
-  PLUGIN_URL=/ext/$PLUGIN_NAME          # where fossil serves PLUGIN_DIR, below the repository's root url
+  self=$(readlink -f "$self" 2>/dev/null || printf '%s' "$self")
+  PLUGIN_NAME=${1:-$(basename "$(dirname "$self")")}
+  PLUGIN_DIR=$(dirname "$self")         # the plugin's own folder: where the running main is
+  if [ -n "${1:-}" ]; then PLUGIN_DIR=$(plugin_dir "$1") || PLUGIN_DIR=$PLUGINS_DIR/$1; fi
+  PLUGIN_WEB=$PLUGIN_DIR/web            # the only part of the folder tkt serves; see route_plugin
+  PLUGIN_JS=$PLUGIN_WEB/js
+  PLUGIN_CSS=$PLUGIN_WEB/css
+  PLUGIN_SQL=$PLUGIN_DIR/sql
+  PLUGIN_DATA=$PLUGIN_DIR/data          # content the plugin's init seeds
+  PLUGIN_URL=/ext/tkt/ext/$PLUGIN_NAME  # where tkt serves PLUGIN_WEB and the plugin's page, below the repository's root url
 }
 
 locate() {
@@ -1762,6 +1769,7 @@ verb_init() {
   skin_details >"$tmp/details"
   init_config
   old_paths
+  old_plugins
   old_actions_page
   reports >"$tmp/reports"
   sqlq "replace into config(name,value,mtime) values('ticket-table',cast(readfile('$tmp/schema') as text),strftime('%s','now'));" \
@@ -1790,15 +1798,63 @@ verb_init() {
   plugin_init
 }
 
-# a plugin is a directory $EXT_DIR/<name> holding an executable main, beside whatever static files it serves (fossil
-# serves the directory as its extroot). one name per line; a directory named tkt is never a plugin
+# the folders plugins are looked for in, in order: this tracker's own, then each one the search path names, colon-separated
+plugin_homes() {
+  local parts home
+  [ -z "${TKT_DIR:-}" ] || printf '%s\n' "$TKT_DIR/plugins"
+  IFS=: read -r -a parts <<<"${TKT_EXT_PATH:-}"
+  for home in "${parts[@]}"; do [ -z "$home" ] || printf '%s\n' "$home"; done
+}
+
+# a plugin is a directory in a folder's extension folder, beside whatever static files it serves; one name per line, never tkt
 plugin_list() {
-  local f name
-  for f in "$EXT_DIR"/*/main; do
-    name=$(basename "$(dirname "$f")")
-    [ -f "$f" ] && [ -x "$f" ] && [ "$name" != tkt ] || continue
-    printf '%s\n' "$name"
-  done
+  local home d name seen=' '
+  while IFS= read -r home; do
+    for d in "$home"/*/; do
+      name=$(basename "$d")
+      [ -d "$d" ] && [ "$name" != tkt ] || continue
+      case "$seen" in *" $name "*) continue ;; esac
+      seen="$seen$name "
+      printf '%s\n' "$name"
+    done
+  done < <(plugin_homes)
+}
+
+# the first directory the search finds for the plugin named, entry file or not; fails when no folder has one
+plugin_dir() {
+  local home
+  while IFS= read -r home; do
+    if [ -d "$home/$1" ]; then printf '%s' "$home/$1"; return; fi
+  done < <(plugin_homes)
+  return 1
+}
+
+# the extensions a plugin's entry file may carry, each naming what runs it
+PLUGIN_EXTS='sh'
+
+# the entry file of the plugin named: the first main with a supported extension the search finds, failing when there is none
+plugin_main() {
+  local home ext
+  while IFS= read -r home; do
+    for ext in $PLUGIN_EXTS; do
+      if [ -f "$home/$1/main.$ext" ]; then printf '%s' "$home/$1/main.$ext"; return; fi
+    done
+  done < <(plugin_homes)
+  return 1
+}
+
+# what to say of a plugin that has no entry file
+plugin_missing() {
+  printf 'plugin %s has no entry file: %s holds no main with a supported extension (%s)' "$1" "$(plugin_dir "$1")" "$PLUGIN_EXTS"
+}
+
+# run an entry file with the arguments after it, under what its extension names
+plugin_run() {
+  local entry=$1
+  shift
+  case "$entry" in
+    *.sh) TKT_LIB=$TKT_FILE TKT_SELF=$(self_path) bash "$entry" "$@" ;;
+  esac
 }
 
 # the main menu entries of every installed plugin, as <li>s for the skin header, from plugins.<name>.menu in the
@@ -1809,17 +1865,22 @@ plugin_list() {
 # values are escaped for html, and $ for the header's TH1
 plugin_menu() {
   have_jq && config_ok || return 0
-  config_json | jq -r '
+  local name entry entries=()
+  for name in $(plugin_list); do
+    entry=$(plugin_main "$name") || continue
+    entries+=(--arg "$name" "$(basename "$entry")")
+  done
+  config_json | jq -r "${entries[@]}" '
     def esc: tostring | @html | gsub("\\$"; "&#36;");
     (.plugins // {}) as $p | $ARGS.positional[] as $name | ($p[$name].menu // [])[]? | select(type == "object")
     | (.label // $name | tostring) as $label
-    | (.url // "/ext/\($name)/main" | tostring) as $url
+    | (.url // "/ext/tkt/ext/\($name)/\($ARGS.named[$name] // "main.sh")" | tostring) as $url
     | (.cap // "" | tostring | gsub("[^a-zA-Z0-9]"; "")) as $cap
     | (if $cap != "" then "<th1>enable_output [anycap \($cap)]</th1>" else "" end)
       + "<li class=\"tkt-menuicon tkt-plugmenu\" data-tkt-menu=\"\($name | esc)\"><a href=\""
       + (if $url | startswith("/") then "$home" else "" end) + ($url | esc)
       + "\" aria-label=\"\(.tooltip // $label | esc)\">"
-      + (if .icon then "<span class=\"tkt-menumask\" aria-hidden=\"true\" style=\"--tkt-icon: url(&quot;$home/ext/\($name | esc)/icons/\(.icon | esc).svg&quot;)\"></span>" else ($label | esc) end)
+      + (if .icon then "<span class=\"tkt-menumask\" aria-hidden=\"true\" style=\"--tkt-icon: url(&quot;$home/ext/tkt/ext/\($name | esc)/icons/\(.icon | esc).svg&quot;)\"></span>" else ($label | esc) end)
       + "</a></li>"
       + (if $cap != "" then "<th1>enable_output 1</th1>" else "" end)' --args $(plugin_list)
 }
@@ -1830,24 +1891,34 @@ plugin_menu() {
 # the tabler icons a plugin's menu names, kept as its own assets in $EXT_DIR/<name>/icons/<icon>.svg so the menu
 # works offline. each is fetched once; best effort, since a missing one only leaves its button blank
 plugin_icons() {
-  local icon dir=$EXT_DIR/$1/icons
+  local icon dir=$PLUGINS_DIR/$1/web/icons shipped
   have_jq && config_ok || return 0
+  shipped=$(plugin_main "$1") && shipped=$(dirname "$shipped")/web/icons
   for icon in $(config_json | jq -r --arg n "$1" '(.plugins[$n].menu // [])[]? | .icon? // empty | tostring | select(test("^[a-z0-9-]+$"))'); do
     [ -s "$dir/$icon.svg" ] && continue
+    [ -s "$shipped/$icon.svg" ] && continue
     mkdir -p "$dir"
     curl -fsS "$TABLER_ICONS/$icon.svg" -o "$dir/$icon.svg" 2>/dev/null || { rm -f "$dir/$icon.svg"; note "$1: could not fetch icon $icon"; }
   done
 }
 
 plugin_init() {
-  local name rc failed=0
+  local name entry shown rc failed=0
   for name in $(plugin_list); do
-    mkdir -p "$BIN_DIR"
-    ln -sfn "../ext/$name/main" "$BIN_DIR/$name"
+    if ! entry=$(plugin_main "$name"); then
+      note "init ${E_BOLD}$name${E_OFF}: ${E_RED}failed${E_OFF}: $(plugin_missing "$name"), carrying on"
+      failed=$((failed + 1))
+      continue
+    fi
+    # only a plugin in this tracker's own folder gets the link; one found further along the search stays where it is
+    shown=$entry
+    case "$entry" in
+      "$PLUGINS_DIR"/*) mkdir -p "$BIN_DIR"; ln -sfn "../plugins/$name/$(basename "$entry")" "$BIN_DIR/$name"; shown=$BIN_DIR/$name ;;
+    esac
     plugin_icons "$name"
-    note "init ${E_BOLD}$name${E_OFF}: $BIN_DIR/$name init"
+    note "init ${E_BOLD}$name${E_OFF}: $shown init"
     rc=0
-    TKT_DB=$REPO "$BIN_DIR/$name" init >&2 </dev/null || rc=$?
+    TKT_DB=$REPO plugin_run "$entry" init >&2 </dev/null || rc=$?
     if [ "$rc" = 0 ]; then
       note "init ${E_BOLD}$name${E_OFF}: ${E_GREEN}ok${E_OFF}"
     else
@@ -2216,6 +2287,34 @@ verb_serve() {
   exec fossil server "$REPO" --port "$at" --localhost --localauth --extroot "$EXT_DIR"
 }
 
+# serve, left running after this command returns; what serve said is shown only when the server does not come up
+verb_start() {
+  need
+  local at url err child old pid port n=0
+  at=$(port_of "$@")
+  url=http://localhost:$at/ticket
+  read -r old port <<<"$(running)"
+  err=$(mktemp)
+  TKT_DB=$REPO TKT_OPEN=0 nohup "$(self_path)" serve "port=$at" </dev/null >/dev/null 2>"$err" &
+  child=$!
+  while :; do
+    read -r pid port <<<"$(running)"
+    if [ -n "$pid" ] && [ "$pid" != "$old" ] && busy "$at"; then break; fi
+    if ! kill -0 "$child" 2>/dev/null || [ $n -ge 100 ]; then
+      kill "$child" 2>/dev/null || true
+      cat "$err" >&2
+      rm -f "$err"
+      die "the server did not start on port $at"
+    fi
+    sleep 0.1
+    n=$((n + 1))
+  done
+  rm -f "$err"
+  printf '%s\n' "$url"
+  note "serving $REPO in the background as pid $pid; tkt stop ends it"
+  open_when_up "$at" "$url"
+}
+
 verb_stop() {
   halt || note "nothing serving $REPO"
 }
@@ -2290,20 +2389,20 @@ verb_sql() {
 
 # the Claude Code skill: tkt's own part, then a section from each installed plugin that has one
 skill_md() {
-  local name first=1
+  local name entry section first=1
   skill_core
-  [ -n "${TKT_DIR:-}" ] || return 0
   for name in $(plugin_list); do
-    [ -f "$HOME_DIR/skill/$name.md" ] || continue
+    entry=$(plugin_main "$name") || continue
+    section=$(dirname "$entry")/skill.md
+    [ -f "$section" ] || continue
     if [ -n "$first" ]; then printf '\n## Plugins\n\nEach installed plugin adds a section; run one as `tkt <plugin> ...`.\n'; first=; fi
     printf '\n'
     # a plugin's ## headings become ### and so on, nesting it under Plugins
-    sed 's/^#/##/' "$HOME_DIR/skill/$name.md"
+    sed 's/^#/##/' "$section"
   done
 }
 
-# tkt's own part of the skill, which the test suite keeps identical to the copy under skills/tkt. plugins contribute
-# theirs from .tkt/skill/<plugin>.md (see skill_md)
+# tkt's own part of the skill, kept here and nowhere else; a plugin adds its section from a file in the skill folder of .tkt, see skill_md
 skill_core() {
   cat <<'SKILL_MD'
 ---
@@ -2490,18 +2589,19 @@ owed.
 
 ## Web ui
 
-`tkt serve` runs in the foreground until stopped, and prints its url as its first line.
-Each tracker has one server: a new `tkt serve`, from any terminal, stops the old one first.
+`tkt start` runs the web ui in the background: it prints the url as its only line of output
+and returns. `tkt serve` runs the same server in the foreground until stopped. Each tracker
+has one server: a new `tkt start` or `tkt serve`, from any terminal, stops the old one first.
 
 - **Check first:** `tkt status` prints the url when a server is running, and fails when
   none is.
 - **Offer, then start:** start a server only when the human wants the web ui. Run
-  `tkt serve` as a background command, and tell the human three things: the url, that the
-  server runs inside this session, and that running `tkt serve` in their own terminal
-  takes it over there, in the foreground where they can watch and Ctrl-C it.
-- **Port:** the default is 9080 for every project, so `serve` fails with `port ... is taken`
+  `tkt start`, and tell the human three things: the url, that the server keeps running
+  after this session ends until `tkt stop`, and that running `tkt serve` in their own
+  terminal takes it over there, in the foreground where they can watch and Ctrl-C it.
+- **Port:** the default is 9080 for every project, so `start` fails with `port ... is taken`
   when another project is already serving. Do not stop that other server. Pick a free port
-  and pass it, `tkt serve port=9081`, and tell the human that adding `TKT_PORT=9081` to the
+  and pass it, `tkt start port=9081`, and tell the human that adding `TKT_PORT=9081` to the
   project's `.env` beside `.tkt.fossil` makes it the default. Never edit `.env` yourself
   unless asked. `TKT_PORT` in the environment beats `.env`, and `port=` beats both.
 - **Stop:** `tkt stop` works from anywhere.
@@ -2683,6 +2783,33 @@ old_paths() {
     mv "$old" "$new"
     note "moved $old to $new"
   done
+}
+
+# a plugin once sat in fossil's own folder with its other files in folders beside that; init moves each into one folder
+old_plugins() {
+  local d name new f
+  for d in "$EXT_DIR"/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    new=$PLUGINS_DIR/$name
+    [ ! -e "$new" ] || continue
+    mkdir -p "$new/web"
+    for f in "$d"*; do
+      [ -e "$f" ] || continue
+      case "$(basename "$f")" in
+        main) mv "$f" "$new/main.sh" ;;
+        main.*) mv "$f" "$new/" ;;
+        *) mv "$f" "$new/web/" ;;
+      esac
+    done
+    rmdir "$d" 2>/dev/null || true
+    [ ! -d "$TKT_DIR/sql/$name" ] || mv "$TKT_DIR/sql/$name" "$new/sql"
+    [ ! -d "$TKT_DIR/data/$name" ] || mv "$TKT_DIR/data/$name" "$new/data"
+    [ ! -f "$TKT_DIR/skill/$name.md" ] || mv "$TKT_DIR/skill/$name.md" "$new/skill.md"
+    rmdir "$new/web" 2>/dev/null || true
+    note "moved the plugin $name to $new"
+  done
+  rmdir "$TKT_DIR/sql" "$TKT_DIR/data" "$TKT_DIR/skill" 2>/dev/null || true
 }
 
 # init writes the default config only where there is none, and never touches one that exists
@@ -2896,7 +3023,8 @@ cgi_env() {
   eval "home=~$(id -un)" 2>/dev/null || true
   case "$home" in /*) ;; *) home=$PROJECT_DIR ;; esac
   export HOME=${HOME:-$home} TKT_DB=$REPO
-  export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+  # a distribution that carries its own tools names their directories in TKT_PATH, which go first
+  export PATH=${TKT_PATH:+$TKT_PATH:}$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
   # USER is scrubbed too, and fossil needs one to write: the web user who pressed the button
   export USER=${FOSSIL_USER:-${REMOTE_USER:-$(id -un)}}
   BASE=$SCRIPT_NAME
@@ -3096,6 +3224,50 @@ route_job() {
   card_close
 }
 
+# the content type of a plugin's static file, by its extension
+mime_of() {
+  case "$1" in
+    *.css) printf 'text/css; charset=utf-8' ;;
+    *.js) printf 'text/javascript; charset=utf-8' ;;
+    *.svg) printf 'image/svg+xml' ;;
+    *.png) printf 'image/png' ;;
+    *.jpg|*.jpeg) printf 'image/jpeg' ;;
+    *.gif) printf 'image/gif' ;;
+    *.json) printf 'application/json' ;;
+    *.html) printf 'text/html; charset=utf-8' ;;
+    *.txt|*.md) printf 'text/plain; charset=utf-8' ;;
+    *) printf 'application/octet-stream' ;;
+  esac
+}
+
+# a plugin's page or one of its static files, wherever the search finds the plugin: fossil runs only tkt, and tkt serves them
+route_plugin() {
+  local name=${1%%/*} rest= entry base home f
+  case "$1" in */*) rest=${1#*/} ;; esac
+  case "$name" in ''|tkt|*[!a-z0-9_-]*) cgi_fail 404 "no plugin $name" ;; esac
+  if [ -n "$rest" ]; then case "/$rest/" in */../*|*/./*|*//*) cgi_fail 400 "bad path: $rest" ;; esac; fi
+  plugin_dir "$name" >/dev/null || cgi_fail 404 "no plugin $name"
+  entry=$(plugin_main "$name") || cgi_fail 404 "$(plugin_missing "$name")"
+  base=$(basename "$entry")
+  # the entry's own name, or nothing after the plugin's, is its page; what follows the name is the page's own path
+  case "$rest" in
+    ''|"$base"|"$base"/*)
+      SCRIPT_NAME=$SCRIPT_NAME/ext/$name${rest:+/$base}
+      rest=${rest#"$base"}
+      SCRIPT_NAME=$SCRIPT_NAME PATH_INFO=$rest GATEWAY_INTERFACE=CGI/1.0 plugin_run "$entry"
+      return ;;
+  esac
+  while IFS= read -r home; do
+    f=$home/$name/web/$rest
+    if [ -f "$f" ]; then
+      printf 'Content-Type: %s\r\n\r\n' "$(mime_of "$f")"
+      cat "$f"
+      return
+    fi
+  done < <(plugin_homes)
+  cgi_fail 404 "no file $rest in plugin $name"
+}
+
 cgi_main() {
   cgi_env
   case "${PATH_INFO:-}" in
@@ -3103,24 +3275,27 @@ cgi_main() {
     /buttons) route_buttons ;;
     /run/*) route_run "${PATH_INFO#/run/}" ;;
     /job/*) route_job "${PATH_INFO#/job/}" ;;
+    /ext/*) route_plugin "${PATH_INFO#/ext/}" ;;
     *) cgi_fail 404 "no page ${PATH_INFO}" ;;
   esac
 }
 
 main() {
   if is_cgi "$@"; then cgi_main; return; fi
-  local verb=${1:-help}
+  local verb=${1:-help} entry
   [ $# -eq 0 ] || shift
   case "$verb" in
     help|-h|--help) usage | paint_help; return ;;
     version|--version) printf 'tkt %s\n' "$TKT_VERSION"; return ;;
     skill) verb_skill "$@"; return ;;
-    init|new|show|list|search|todo|triage|edit|comment|tag|block|parent|set|close|clean|serve|stop|status|sql|action|run) ;;
+    init|new|show|list|search|todo|triage|edit|comment|tag|block|parent|set|close|clean|serve|start|stop|status|sql|action|run) ;;
     *)
       # any other verb naming an installed plugin runs that plugin, with TKT_DB set so it finds this same tracker
       locate
-      if [ "$verb" != tkt ] && [ -f "$EXT_DIR/$verb/main" ] && [ -x "$EXT_DIR/$verb/main" ]; then
-        TKT_DB=$REPO exec "$EXT_DIR/$verb/main" "$@"
+      if [ "$verb" != tkt ] && plugin_dir "$verb" >/dev/null; then
+        entry=$(plugin_main "$verb") || die "$(plugin_missing "$verb")"
+        TKT_DB=$REPO plugin_run "$entry" "$@"
+        return
       fi
       usage >&2; die "unknown verb: $verb" ;;
   esac

@@ -5,3 +5,5 @@ __pycache__/
 .env
 docs/img/src-*/
 .claude/csop-state/
+scratch/
+.ape-*

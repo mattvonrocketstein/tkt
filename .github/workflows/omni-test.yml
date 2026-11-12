@@ -1,0 +1,45 @@
+# Test the tkt omni-pack.yml kept, never a fresh build: the suite with that binary as the tkt under test, on hosts that never built it and have no fossil of their own; dev.yml calls this.
+name: Omni test
+on:
+  workflow_call: {}
+permissions:
+  contents: read
+jobs:
+  suite:
+    name: Suite on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-24.04, ubuntu-24.04-arm, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Download tkt
+        uses: actions/download-artifact@v8
+        with:
+          name: tkt-omni
+          path: ${{ runner.temp }}/omni
+      # A host with no ape loader registered cannot exec the file directly, and the suite starts it from python; sh runs the bootstrap.
+      - name: Name the binary as the tkt under test
+        run: |
+          chmod +x "$RUNNER_TEMP/omni/tkt"
+          echo "TKT_CMD=sh $RUNNER_TEMP/omni/tkt" >> "$GITHUB_ENV"
+      # The first run unpacks the binary's tools into the cache; the banner must be this checkout's script's.
+      - name: The binary runs as tkt
+        run: $TKT_CMD version | grep -x "$(bash ./tkt version)"
+      # Nothing here installs fossil, so a pass proves the bundled one; the fixtures that need a bare fossil use it too.
+      - name: No host fossil, and the bundled one for bare repos
+        run: |
+          ! command -v fossil
+          tools=$(echo "$HOME"/.cache/amk/*/bin)
+          [ -x "$tools/fossil" ]
+          echo "TKT_FOSSIL=sh $tools/fossil" >> "$GITHUB_ENV"
+          echo "OMNI_TOOLS=$tools" >> "$GITHUB_ENV"
+      # The tests of tkt as fossil's extension run the plain script, whose fixed search path needs a fossil in a standard directory.
+      - name: Lend the bundled fossil to the plain-script tests
+        run: |
+          sudo mkdir -p /usr/local/bin
+          sudo ln -s "$OMNI_TOOLS/fossil" /usr/local/bin/fossil
+      - run: make init
+      - run: make test
