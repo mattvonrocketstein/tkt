@@ -2,6 +2,7 @@
 *.tar.gz
 *.zip
 *.ape
+*.part
 /cosmocc/
 # Build trees and outputs; make clean drops them.
 /build/

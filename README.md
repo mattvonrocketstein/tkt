@@ -100,7 +100,7 @@ When the project already has a `.claude/` (Claude Code), `.pi/` (pi), or `.agent
 | `TKT_DB` | The nearest `.tkt.fossil` | Tracker file |
 | `TKT_USER` | `$USER` | Admin user created by `init` |
 | `TKT_PORT` | `9080` | Port for `serve`; the environment wins, else a `TKT_PORT=` line in `.env` beside the tracker |
-| `TKT_EXT_PATH` | Unset | More folders to find plugins in, colon-separated, each shaped like `.tkt` (`ext/`, `data/`, `sql/`, `skill/`). They are searched in order after the tracker's own `.tkt`, and the first folder that has a plugin wins |
+| `TKT_PLUGINS` | Unset | More folders of plugins, colon-separated. Each holds one folder per plugin. A plugin's entry files say what it offers and what runs them: `main.<ext>` is its command, `tkt <name> ...`, and `web.<ext>` its page, where `<ext>` is `sh` for bash or `micropy` for `micropython`; a plugin with only `main` serves its page from there, and one with only `web` offers no command. Beside them sit the plugin's `web/` folder (the only files served), `sql/`, `data/`, `skill.md` and its own `tkt.json`. They are searched in order after the tracker's own `.tkt/plugins`, and the first folder that has a plugin wins |
 | `TKT_PATH` | Unset | Directories put first on `PATH` when fossil runs tkt for the web ui, for a distribution that carries its own tools |
 | `NO_COLOR`, `NOCOLOR` | Unset | Any value turns off color on a terminal |
 
@@ -327,7 +327,17 @@ http://localhost:9080/ticket
 
 Actions are buttons that run project commands on the server: tests, a build, a deploy check. They show on every ticket and on the actions page at `/ext/tkt`, behind the settings icon in the menu, and `tkt action run` runs the same ones from the command line. They need [jq](https://jqlang.org).
 
-They are configured in `.tkt/tkt.json` beside the tracker, under its `actions` key; an older `.tkt.json` beside the tracker is still read while `.tkt/tkt.json` is missing. The file is json once its whole-line `//` comments are dropped, so it can explain itself. `tkt init` writes a starting one when there is none, holding the format in its comments and one action, **Clean Jobs**; it never touches a file that exists. The old `config/Actions` wiki page is no longer read, and `tkt init` and `tkt action list` say so while it exists.
+They are configured in `.tkt/tkt.json` beside the tracker, under its `actions` key; an older `.tkt.json` beside the tracker is still read while `.tkt/tkt.json` is missing. The file is json once its whole-line `//` comments are dropped, so it can explain itself. `tkt init` writes a starting one when there is none, holding the format in its comments; it never touches a file that exists. The old `config/Actions` wiki page is no longer read, and `tkt init` and `tkt action list` say so while it exists.
+
+That file is the nearest of several layers. From farthest to nearest they are: what tkt itself gives, which is one action, **Clean Jobs**; a `tkt.json` at the top of each folder of plugins; each plugin's own `tkt.json`, which speaks for `plugins.<name>`; then the tracker's file. One rule merges them, nearer over farther:
+
+| In both layers | Result |
+| --- | --- |
+| An object | Merged key by key, by this same rule |
+| A list of records, such as `actions` or a plugin's `menu` | The farther list, in its order. A nearer record with the same `name`, or the same `label` when it has no name, replaces that record whole and stays in its place. Other nearer records go last |
+| Anything else, a list of plain values such as `agent` or a `command` included | One value: the nearer replaces the farther |
+
+A record with `"enabled": false` is dropped after the merge, so `{"name": "clean-jobs", "enabled": false}` in the tracker's file removes the inherited action. An empty list adds nothing and removes nothing. A layer that is not valid json is skipped. The rule knows no key names, so it holds as the config grows.
 
 ```js
 // Test runs for the ticket at hand.

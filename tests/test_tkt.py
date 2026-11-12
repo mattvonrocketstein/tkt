@@ -85,6 +85,10 @@ def template(tmp_path_factory):
     return db
 
 
+# a raw query through fossil, one value per column with a bar between: an older fossil quotes values unless told the mode
+SQL = ("run", "sql", "-list")
+
+
 class Tracker:
     def __init__(self, db, cwd):
         self.db = db
@@ -112,7 +116,7 @@ class Tracker:
         return self.ok("show", id)
 
     def sql(self, query):
-        return self.ok("run", "sql", query).strip()
+        return self.ok(*SQL, query).strip()
 
 
 @pytest.fixture
@@ -161,7 +165,7 @@ def plain_fossil(path):
 
 
 def config(db, name):
-    return run("run", "sql", f"select value from config where name='{name}';", db=db).stdout.strip()
+    return run(*SQL, f"select value from config where name='{name}';", db=db).stdout.strip()
 
 
 class TestSurface:
@@ -213,7 +217,7 @@ class TestLocation:
         assert run("init", cwd=work, path=no_git_path).returncode == 0
         r = run("new", "title=no git", cwd=work, path=no_git_path)
         assert r.returncode == 0, r.stderr
-        assert run("run", "sql", "select coalesce(foundin,'') from ticket;", cwd=work, path=no_git_path).stdout.strip() == ""
+        assert run(*SQL, "select coalesce(foundin,'') from ticket;", cwd=work, path=no_git_path).stdout.strip() == ""
 
     def test_plain_repo_under_old_name_is_ignored(self, project):
         plain_fossil(project / ".fossil.db")
@@ -1091,7 +1095,26 @@ class TestPluginEntry:
 
     def test_a_plugin_without_an_entry_file_is_an_error(self, tkt):
         self.ext(tkt, "hollow")
-        tkt.fails("hollow", match=r"plugin hollow has no entry file: .*/\.tkt/plugins/hollow holds no main with a supported extension \(sh\)")
+        tkt.fails("hollow", match=r"plugin hollow has no entry file: .*/\.tkt/plugins/hollow holds no main or web with a supported extension \(sh micropy\)")
+
+    def test_a_plugin_is_told_about_tkt_and_about_itself(self, tkt):
+        d = self.ext(tkt, "facts")
+        (d / "main.sh").write_text('printf "%s\\n" "$TKT_PLUGIN_NAME" "$TKT_PLUGIN_DIR" "$TKT_PLUGIN_URL" "$TKT_DB"; [ -f "$TKT_LIB" ] && [ -x "$TKT_SELF" ]\n')
+        assert tkt.ok("facts").splitlines() == ["facts", str(d), "/ext/tkt/ext/facts", str(tkt.db)]
+
+    def test_a_plugin_with_only_a_web_entry_offers_no_verb_and_no_init(self, tkt):
+        (self.ext(tkt, "pageonly") / "web.sh").write_text("echo ran >&2\n")
+        tkt.fails("pageonly", match="unknown verb: pageonly")
+        r = tkt("init")
+        assert r.returncode == 0 and "pageonly" not in r.stderr and "plugin init(s) failed" not in r.stderr
+
+    def test_main_is_the_command_and_web_is_the_page(self, tkt):
+        d = self.ext(tkt, "both")
+        (d / "main.sh").write_text('echo "command $*"\n')
+        (d / "web.sh").write_text('printf "Content-Type: text/plain\\r\\n\\r\\npage %s" "$SCRIPT_NAME"\n')
+        assert tkt.ok("both", "x") == "command x\n"
+        assert cgi(tkt, "/ext/both/web.sh")[1] == "page /ext/tkt/ext/both/web.sh"
+        assert cgi(tkt, "/ext/both")[1] == "page /ext/tkt/ext/both"
 
     def test_an_entry_file_without_an_extension_is_not_one(self, tkt):
         legacy = self.ext(tkt, "legacy") / "main"
@@ -1104,6 +1127,94 @@ class TestPluginEntry:
         r = tkt("init")
         assert r.returncode == 0, r.stderr
         assert "plugin hollow has no entry file" in r.stderr and "1 plugin init(s) failed" in r.stderr
+
+
+class TestConfigLayers:
+    """The config is layers, nearer over farther: tkt's own, a folder of plugins' file, each plugin's, the tracker's."""
+
+    pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="the config needs jq")
+
+    def own(self, tkt, config):
+        (tkt.db.parent / ".tkt").mkdir(exist_ok=True)
+        (tkt.db.parent / ".tkt" / "tkt.json").write_text(config if isinstance(config, str) else json.dumps(config))
+
+    def far(self, tmp_path, folder=None, greet=None):
+        far = tmp_path / "far"
+        (far / "greet").mkdir(parents=True, exist_ok=True)
+        (far / "greet" / "main.sh").write_text("echo far\n")
+        if folder is not None:
+            (far / "tkt.json").write_text(folder if isinstance(folder, str) else json.dumps(folder))
+        if greet is not None:
+            (far / "greet" / "tkt.json").write_text(greet if isinstance(greet, str) else json.dumps(greet))
+        return {"TKT_PLUGINS": str(far)}
+
+    def rows(self, tkt, extra=None):
+        out = run("action", "list", db=tkt.db, extra=extra).stdout
+        return [[c.strip() for c in line.strip("|").split("|")] for line in out.splitlines()[2:]]
+
+    def names(self, tkt, extra=None):
+        return [r[0] for r in self.rows(tkt, extra)]
+
+    def test_tkt_gives_clean_jobs_with_no_file_at_all(self, tkt):
+        assert self.names(tkt) == ["clean-jobs"]
+
+    def test_a_trackers_records_go_after_the_ones_it_inherits(self, tkt):
+        self.own(tkt, {"actions": [{"name": "mine", "command": ["true"]}]})
+        assert self.names(tkt) == ["clean-jobs", "mine"]
+
+    def test_a_record_with_an_inherited_name_replaces_it_whole_and_in_place(self, tkt):
+        self.own(tkt, {"actions": [{"name": "mine", "command": ["true"]}, {"name": "clean-jobs", "command": ["echo", "x"]}]})
+        first = self.rows(tkt)[0]
+        # the label falls back to the name and the icon is gone: nothing of the inherited record is left
+        assert first[0] == "clean-jobs" and first[1] == "clean-jobs" and first[2] == "" and first[5] == "`echo x`"
+        assert self.names(tkt) == ["clean-jobs", "mine"]
+
+    def test_enabled_false_removes_an_inherited_record(self, tkt):
+        self.own(tkt, {"actions": [{"name": "clean-jobs", "enabled": False}, {"name": "mine", "command": ["true"]}]})
+        assert self.names(tkt) == ["mine"]
+
+    def test_an_empty_list_still_inherits(self, tkt):
+        self.own(tkt, {"actions": []})
+        assert self.names(tkt) == ["clean-jobs"]
+
+    def test_a_list_of_plain_values_is_one_value_and_the_nearer_wins(self, tkt, tmp_path):
+        extra = self.far(tmp_path, folder={"agent": ["far", "{prompt}"]})
+        def command(name):
+            return next(r[5] for r in self.rows(tkt, extra) if r[0] == name)
+
+        self.own(tkt, {"actions": [{"name": "polish", "skill": ["polish"]}]})
+        assert command("polish") == "`far /tkt {ticket} polish`"
+        self.own(tkt, {"agent": ["near", "{prompt}"], "actions": [{"name": "polish", "skill": ["polish"]}]})
+        assert command("polish") == "`near /tkt {ticket} polish`"
+
+    def test_a_plugin_brings_its_own_config_and_the_tracker_can_change_it(self, tkt, tmp_path):
+        extra = self.far(tmp_path, greet={"actions": [{"name": "hello", "command": ["echo", "hi"]}]})
+        assert self.names(tkt, extra) == ["clean-jobs", "hello"]
+        assert self.names(tkt) == ["clean-jobs"]
+        self.own(tkt, {"plugins": {"greet": {"actions": [{"name": "hello", "enabled": False}]}}})
+        assert self.names(tkt, extra) == ["clean-jobs"]
+
+    def test_a_plugins_config_is_that_of_the_copy_that_won(self, tkt, tmp_path):
+        extra = self.far(tmp_path, greet={"actions": [{"name": "hello", "command": ["echo", "hi"]}]})
+        own = tkt.db.parent / ".tkt" / "plugins" / "greet"
+        own.mkdir(parents=True)
+        (own / "main.sh").write_text("echo own\n")
+        (own / "tkt.json").write_text(json.dumps({"actions": [{"name": "mine", "command": ["true"]}]}))
+        assert self.names(tkt, extra) == ["clean-jobs", "mine"]
+
+    def test_a_layer_that_is_not_json_is_skipped(self, tkt, tmp_path):
+        extra = self.far(tmp_path, folder="// only a comment\n{ nope", greet={"actions": [{"name": "hello", "command": ["true"]}]})
+        assert self.names(tkt, extra) == ["clean-jobs", "hello"]
+        self.own(tkt, "{ nope")
+        r = run("action", "list", db=tkt.db, extra=extra)
+        assert "is not valid json" in r.stderr and "so it is ignored" in r.stderr
+        assert self.names(tkt, extra) == ["clean-jobs", "hello"]
+
+    def test_comment_lines_are_allowed_in_every_layer(self, tkt, tmp_path):
+        extra = self.far(tmp_path, greet='// a plugin explains itself\n{"actions": [\n  // one action\n  {"name": "hello", "command": ["true"]}\n]}\n')
+        self.own(tkt, '// so does a tracker\n{"actions": [{"name": "mine", "command": ["true"]}]}\n')
+        # top-level actions are listed before the plugins' own, as ever
+        assert self.names(tkt, extra) == ["clean-jobs", "mine", "hello"]
 
 
 class TestOldPluginLayout:
@@ -1129,7 +1240,7 @@ class TestOldPluginLayout:
 
 
 class TestPluginPath:
-    """TKT_EXT_PATH names more folders of plugins, searched after the tracker's own, in order."""
+    """TKT_PLUGINS names more folders of plugins, searched after the tracker's own, in order."""
 
     def home(self, tmp_path, name, **plugins):
         home = tmp_path / name
@@ -1140,28 +1251,28 @@ class TestPluginPath:
 
     def test_a_plugin_is_found_in_a_folder_on_the_path(self, tkt, tmp_path):
         far = self.home(tmp_path, "far", greet="far")
-        assert run("greet", "you", db=tkt.db, extra={"TKT_EXT_PATH": str(far)}).stdout == "far you\n"
+        assert run("greet", "you", db=tkt.db, extra={"TKT_PLUGINS": str(far)}).stdout == "far you\n"
         tkt.fails("greet", match="unknown verb: greet")
 
     def test_the_trackers_own_plugin_wins(self, tkt, tmp_path):
         far = self.home(tmp_path, "far", greet="far")
         self.home(tkt.db.parent / ".tkt", "plugins", greet="own")
-        assert run("greet", db=tkt.db, extra={"TKT_EXT_PATH": str(far)}).stdout == "own \n"
+        assert run("greet", db=tkt.db, extra={"TKT_PLUGINS": str(far)}).stdout == "own \n"
 
     def test_earlier_folders_win_and_empty_or_missing_ones_are_skipped(self, tkt, tmp_path):
         a, b = self.home(tmp_path, "a", greet="a"), self.home(tmp_path, "b", greet="b", only="b")
         path = f":{tmp_path / 'nowhere'}:{a}::{b}:"
-        assert run("greet", db=tkt.db, extra={"TKT_EXT_PATH": path}).stdout == "a \n"
-        assert run("only", db=tkt.db, extra={"TKT_EXT_PATH": path}).stdout == "b \n"
+        assert run("greet", db=tkt.db, extra={"TKT_PLUGINS": path}).stdout == "a \n"
+        assert run("only", db=tkt.db, extra={"TKT_PLUGINS": path}).stdout == "b \n"
 
     def test_a_directory_without_an_entry_does_not_hide_a_later_plugin(self, tkt, tmp_path):
         far = self.home(tmp_path, "far", greet="far")
         (tkt.db.parent / ".tkt" / "plugins" / "greet" / "web" / "icons").mkdir(parents=True)
-        assert run("greet", db=tkt.db, extra={"TKT_EXT_PATH": str(far)}).stdout == "far \n"
+        assert run("greet", db=tkt.db, extra={"TKT_PLUGINS": str(far)}).stdout == "far \n"
 
     def test_a_plugins_files_are_the_ones_beside_it(self, tmp_path):
         install_plugins(tmp_path / "shipped", "tet", "wiki", always=True)
-        extra = {"TKT_EXT_PATH": str(tmp_path / "shipped" / ".tkt" / "plugins")}
+        extra = {"TKT_PLUGINS": str(tmp_path / "shipped" / ".tkt" / "plugins")}
         project = tmp_path / "project"
         project.mkdir()
         db = project / "tracker.fossil"
@@ -1201,7 +1312,7 @@ class TestSkill:
         (far / "greet").mkdir(parents=True)
         (far / "greet" / "main.sh").write_text("echo hi\n")
         (far / "greet" / "skill.md").write_text("## Greet\n\nSay hi.\n")
-        r = run("skill", "install", extra={"HOME": str(tmp_path / "h"), "CLAUDE_CONFIG_DIR": "", "TKT_EXT_PATH": str(far)})
+        r = run("skill", "install", extra={"HOME": str(tmp_path / "h"), "CLAUDE_CONFIG_DIR": "", "TKT_PLUGINS": str(far)})
         assert r.returncode == 0, r.stderr
         installed = (tmp_path / "h" / ".claude" / "skills" / "tkt" / "SKILL.md").read_text()
         assert "\n## Plugins\n" in installed and "\n### Greet\n\nSay hi.\n" in installed
@@ -1382,9 +1493,11 @@ def actions_page(*actions):
 
 
 def put_actions(tkt, actions):
-    """A .tkt.json beside the tracker holding these actions, under leading // comments as tkt init writes them."""
+    """A .tkt.json beside the tracker holding these actions, under leading // comments as tkt init writes them, with the
+    action tkt itself gives switched off so a test sees only its own."""
     import json
 
+    actions = [{"name": "clean-jobs", "enabled": False}, *actions]
     (tkt.db.parent / ".tkt.json").write_text("// a comment\n  // an indented one\n" + json.dumps({"actions": actions}, indent=2) + "\n")
 
 
@@ -1429,7 +1542,9 @@ class TestActions:
     def test_none_configured(self, tkt):
         (tkt.db.parent / ".tkt.json").unlink(missing_ok=True)
         r = tkt("action", "list")
-        assert r.stdout.splitlines() == ["| Action | Label | Icon | Scope | Comment | Command |", "| --- | --- | --- | --- | --- | --- |"]
+        # with no file there is still the one action tkt itself gives
+        assert r.stdout.splitlines() == ["| Action | Label | Icon | Scope | Comment | Command |", "| --- | --- | --- | --- | --- | --- |",
+                                         "| clean-jobs | Clean Jobs | archive | project |  | `tkt action clean --keep 0` |"]
         assert "tkt init writes a starting one" in r.stderr
 
     def test_init_writes_a_default_with_clean_jobs(self, tkt):
@@ -1456,10 +1571,12 @@ class TestActions:
         assert "| new |" in out and "| old |" not in out
 
     def test_init_moves_the_old_jobs_and_ext_dirs(self, tkt):
-        for old, new in ((".jobs", "jobs"), (".ext", "ext")):
+        # what sat in the old extension folder was plugins, so it ends up in the folder of plugins
+        moves = ((".jobs", "jobs"), (".ext", "plugins"))
+        for old, new in moves:
             (Path(f"{tkt.db}{old}") / "j1").mkdir(parents=True)
         tkt.ok("init")
-        for old, new in ((".jobs", "jobs"), (".ext", "ext")):
+        for old, new in moves:
             assert not Path(f"{tkt.db}{old}").exists() and (tkt.db.parent / ".tkt" / new / "j1").is_dir()
 
     def test_listed_from_the_file(self, tkt):
@@ -1475,7 +1592,8 @@ class TestActions:
     def test_invalid_json_says_so(self, tkt):
         (tkt.db.parent / ".tkt.json").write_text("// fine\n{nope")
         r = tkt("action", "list")
-        assert len(r.stdout.splitlines()) == 2
+        # the broken file is ignored, and what tkt itself gives is still there
+        assert len(r.stdout.splitlines()) == 3 and "clean-jobs" in r.stdout
         assert ".tkt.json is not valid json" in r.stderr
 
     def test_the_old_wiki_page_is_ignored_with_a_note(self, tkt):
@@ -1843,6 +1961,33 @@ class TestPluginWeb:
         h, page = cgi(tkt, "/ext/echo/css/x.css")
         assert h["Content-Type"] == "text/css; charset=utf-8" and page == "a{}\n"
 
+    def test_a_micropython_page_is_served(self, tkt):
+        """A second language, end to end through a real server: a plugin with only a page, whose entry is MicroPython."""
+        import socket
+        import urllib.request
+
+        if not (os.environ.get("TKT_CMD") or shutil.which("micropython")):
+            pytest.skip("needs micropython, which a distribution may carry and this host lacks")
+        d = self.plugin(self.own(tkt), name="hello", entry=None)
+        (d / "web.micropy").write_text(
+            "import os, sys\n"
+            'sys.stdout.write("Content-Type: text/plain\\r\\n\\r\\n")\n'
+            'facts = [os.getenv(n) for n in ("TKT_PLUGIN_NAME", "SCRIPT_NAME", "PATH_INFO", "QUERY_STRING")]\n'
+            'sys.stdout.write("hello from %s at %s%s?%s" % tuple(facts))\n'
+        )
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        r = tkt("start", f"port={port}")
+        try:
+            assert r.returncode == 0, r.stderr
+            page = urllib.request.urlopen(f"http://localhost:{port}/ext/tkt/ext/hello/web.micropy/sub?x=1", timeout=10).read().decode()
+            # fossil wraps a plain-text reply in the site's skin, so the plugin's line arrives inside a page
+            assert "hello from hello at /ext/tkt/ext/hello/web.micropy/sub?x=1" in page
+            tkt.fails("hello", match="unknown verb: hello")
+        finally:
+            tkt("stop")
+
     def test_only_the_web_folder_has_an_address(self, tkt):
         d = self.plugin(self.own(tkt))
         (d / "sql").mkdir()
@@ -1858,7 +2003,7 @@ class TestPluginWeb:
         (far / "web" / "b.txt").write_text("far b\n")
         own = self.plugin(self.own(tkt), entry=None)
         (own / "web" / "b.txt").write_text("own b\n")
-        extra = {"TKT_EXT_PATH": str(tmp_path / "far")}
+        extra = {"TKT_PLUGINS": str(tmp_path / "far")}
         assert cgi(tkt, "/ext/echo/main.sh", extra=extra)[1].startswith("/ext/tkt/ext/echo/main.sh|")
         assert cgi(tkt, "/ext/echo/a.txt", extra=extra)[1] == "far a\n"
         assert cgi(tkt, "/ext/echo/b.txt", extra=extra)[1] == "own b\n"

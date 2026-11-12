@@ -11,13 +11,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-      # Every input is pinned by digest in omni/Makefile, so that file is the cache key; the fallback shares the toolchain across its edits.
+      # Every input, the amk release among them, is pinned by digest in omni/Makefile, so that file is the cache key; the fallback shares the toolchain across its edits.
       - name: Cache downloads and toolchain
         uses: actions/cache@v6
         with:
           path: |
             omni/*.tar.gz
             omni/*.zip
+            omni/*.ape
             omni/cosmocc
           key: omni-deps-${{ runner.os }}-${{ hashFiles('omni/Makefile') }}
           restore-keys: |

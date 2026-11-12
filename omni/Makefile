@@ -4,9 +4,9 @@ SHELL := bash
 MAKEFLAGS = -s -S --warn-undefined-variables
 HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-# amk is a pinned release with the payload flags; while no version is set, the amk on PATH is used, or one given as amk=PATH.
-amk.version :=
-amk.sha256  :=
+# amk is a pinned release with the payload flags; amk=PATH names another, and with no version set the amk on PATH is used.
+amk.version := 0.0.2
+amk.sha256  := a9a0d8994064295a60a1033c7ffb2ddc70ee4eb4a59d60aac9b1463764e1fec7
 amk.file     = amk-$(amk.version).ape
 amk.url      = https://github.com/Robot-Wranglers/ape-make/releases/download/v$(amk.version)/amk
 amk.pinned   = $(if $(amk.version),$(HERE)$(amk.file))

@@ -18,9 +18,20 @@ jobs:
           path: omni/build
       - name: Restore the exec bit
         run: chmod +x omni/build/fossil
-      # The amk release and its digest are pinned in omni/Makefile; this fetches that one file and checks it.
-      - name: Fetch the pinned amk
+      # The pin lives in omni/Makefile, so that file is the cache key; a changed pin misses and fetches the new release.
+      - name: Cache the pinned amk
+        uses: actions/cache@v6
+        with:
+          path: omni/*.ape
+          key: omni-amk-${{ hashFiles('omni/Makefile') }}
+      # Fetches the release when the cache missed, then checks its digest against the pin either way.
+      - name: Fetch and verify the pinned amk
         run: make omni.amk
+      # The binary's banner must name the version the pin does; a mismatch means the release asset is not that release.
+      - name: The amk is the pinned version
+        run: |
+          v=$(make -s -C omni --eval='v: ; @echo $(amk.version)' v)
+          sh "omni/amk-$v.ape" --version | sed -n 2p | grep -F "(amk $v"
       # The -o flag keeps make from recompiling fossil, which this job has no toolchain for.
       - name: Pack and smoke
         run: make -C omni -o build/fossil repack smoke

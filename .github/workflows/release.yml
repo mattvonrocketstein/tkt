@@ -1,0 +1,89 @@
+# A pushed v-prefixed tag builds the omnibus through omni-build.yml and omni-pack.yml, tests it through omni-test.yml and the script through test.yml, then publishes both with their digests as a GitHub Release.
+name: Release
+on:
+  workflow_dispatch: {}
+  push:
+    tags: [ "v*" ]
+permissions:
+  contents: read
+jobs:
+  build:
+    uses: ./.github/workflows/omni-build.yml
+
+  pack:
+    needs: build
+    uses: ./.github/workflows/omni-pack.yml
+
+  # Nothing publishes until the binary passes the same suite dev.yml runs.
+  test:
+    needs: pack
+    uses: ./.github/workflows/omni-test.yml
+
+  # The script ships too, so it passes its own suite on the hosts test.yml covers.
+  slim:
+    uses: ./.github/workflows/test.yml
+
+  # A manual run on a branch is a dry run: it builds and tests, and this job is skipped.
+  publish:
+    name: Publish release
+    needs: [ test, slim ]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      # Outside the checkout, where the script of the same name already sits.
+      - name: Download tkt
+        uses: actions/download-artifact@v8
+        with:
+          name: tkt-omni
+          path: ${{ runner.temp }}/omni
+      # Both must name the tag they ship under; a mismatch means the version in the script was not raised for this tag.
+      - name: Version matches the tag
+        run: |
+          want="tkt ${GITHUB_REF_NAME#v}"
+          [ "$(bash ./tkt version)" = "$want" ]
+          [ "$(sh "$RUNNER_TEMP/omni/tkt" version)" = "$want" ]
+      - name: Stage assets
+        run: |
+          mkdir -p dist
+          install -m 0755 "$RUNNER_TEMP/omni/tkt" dist/tkt
+          install -m 0755 tkt dist/tkt-slim
+          cd dist
+          sha256sum tkt > tkt.sha256
+          sha256sum tkt-slim > tkt-slim.sha256
+          cat tkt.sha256 tkt-slim.sha256
+      - name: Release notes
+        run: |
+          {
+            echo "tkt ${GITHUB_REF_NAME}: a ticket tracker over fossil."
+            echo
+            echo 'The omnibus is one file with fossil, jq and bash inside, for a host that has none of them:'
+            echo
+            echo '```bash'
+            echo "curl -fsSLO https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/tkt"
+            echo "curl -fsSLO https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/tkt.sha256"
+            echo 'sha256sum -c tkt.sha256 && chmod +x tkt'
+            echo '```'
+            echo
+            echo 'The slim build is the script alone, for a host with fossil, jq and bash of its own:'
+            echo
+            echo '```bash'
+            echo "curl -fsSLO https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/tkt-slim"
+            echo "curl -fsSLO https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/tkt-slim.sha256"
+            echo 'sha256sum -c tkt-slim.sha256 && install -m 0755 tkt-slim tkt'
+            echo '```'
+            echo
+            echo 'The omnibus is built on amk; its inputs are pinned by version and digest in omni/Makefile at this tag.'
+          } > notes.md
+      - name: Create release
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "tkt ${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            --verify-tag \
+            dist/tkt dist/tkt.sha256 dist/tkt-slim dist/tkt-slim.sha256

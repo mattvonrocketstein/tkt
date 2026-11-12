@@ -1,0 +1,10 @@
+// What the tet plugin gives a tracker's config, under plugins.tet: its menu entry, and two skill actions for the agent.
+{
+  "menu": [
+    {"label": "Proposals", "icon": "checklist", "tooltip": "Review proposals"}
+  ],
+  "actions": [
+    {"name": "groom", "label": "Groom", "icon": "wand", "skill": ["groom"]},
+    {"name": "review", "label": "Review", "icon": "eye-check", "skill": ["review"]}
+  ]
+}

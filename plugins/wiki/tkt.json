@@ -1,0 +1,7 @@
+// What the wiki plugin gives a tracker's config, under plugins.wiki: its entries in the main menu.
+{
+  "menu": [
+    {"label": "New Wiki Page", "icon": "text-plus", "url": "/wikinew", "cap": "f"},
+    {"label": "Project Wiki", "icon": "hexagon-letter-w", "url": "/rptview?title=Wiki+Pages", "cap": "j"}
+  ]
+}

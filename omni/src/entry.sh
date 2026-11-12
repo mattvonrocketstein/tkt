@@ -19,10 +19,21 @@ if [ -z "${TKT_SELF:-}" ]; then
   export TKT_SELF=$launcher
 fi
 
+# micropython by that name, for a plugin whose entry asks for it: the binary's own, since a host need not have one
+names=$TKT_SELF.bin
+if [ ! -x "$names/micropython" ] || ! grep -qF "'$self'" "$names/micropython"; then
+  mkdir -p "$names"
+  printf '#!/bin/sh\nexec %s --micropy "$@"\n' "'$self'" >"$names/micropython.$$"
+  chmod +x "$names/micropython.$$"
+  mv "$names/micropython.$$" "$names/micropython"
+fi
+case ":$PATH:" in *":$names:"*) ;; *) export PATH=$names:$PATH ;; esac
+case ":${TKT_PATH:-}:" in *":$names:"*) ;; *) export TKT_PATH=${TKT_PATH:+$TKT_PATH:}$names ;; esac
+
 # the plugins the binary carries are found in place, after the tracker's own and any the caller already named
-case ":${TKT_EXT_PATH:-}:" in
+case ":${TKT_PLUGINS:-}:" in
   *":$shipped:"*) ;;
-  *) export TKT_EXT_PATH=${TKT_EXT_PATH:+$TKT_EXT_PATH:}$shipped ;;
+  *) export TKT_PLUGINS=${TKT_PLUGINS:+$TKT_PLUGINS:}$shipped ;;
 esac
 
 # fossil clears the environment of every program it starts for a web request, so the launcher restores this one

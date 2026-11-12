@@ -1802,7 +1802,7 @@ verb_init() {
 plugin_homes() {
   local parts home
   [ -z "${TKT_DIR:-}" ] || printf '%s\n' "$TKT_DIR/plugins"
-  IFS=: read -r -a parts <<<"${TKT_EXT_PATH:-}"
+  IFS=: read -r -a parts <<<"${TKT_PLUGINS:-}"
   for home in "${parts[@]}"; do [ -z "$home" ] || printf '%s\n' "$home"; done
 }
 
@@ -1830,31 +1830,47 @@ plugin_dir() {
 }
 
 # the extensions a plugin's entry file may carry, each naming what runs it
-PLUGIN_EXTS='sh'
+PLUGIN_EXTS='sh micropy'
 
-# the entry file of the plugin named: the first main with a supported extension the search finds, failing when there is none
-plugin_main() {
-  local home ext
+# a plugin's entry of one kind, main for its command or web for its page; the first folder with either kind is the plugin's
+plugin_entry() {
+  local home kind ext
   while IFS= read -r home; do
-    for ext in $PLUGIN_EXTS; do
-      if [ -f "$home/$1/main.$ext" ]; then printf '%s' "$home/$1/main.$ext"; return; fi
+    for kind in "$1" main web; do
+      for ext in $PLUGIN_EXTS; do
+        [ -f "$home/$2/$kind.$ext" ] || continue
+        [ "$kind" = "$1" ] || return 1
+        printf '%s' "$home/$2/$kind.$ext"
+        return
+      done
     done
   done < <(plugin_homes)
   return 1
 }
 
+# either entry of the plugin named, which says the plugin is there and where; fails when it has none
+plugin_main() { plugin_entry main "$1" || plugin_entry web "$1"; }
+
+# the entry that serves the plugin's page: its web entry, else its main
+plugin_web() { plugin_entry web "$1" || plugin_entry main "$1"; }
+
 # what to say of a plugin that has no entry file
 plugin_missing() {
-  printf 'plugin %s has no entry file: %s holds no main with a supported extension (%s)' "$1" "$(plugin_dir "$1")" "$PLUGIN_EXTS"
+  printf 'plugin %s has no entry file: %s holds no main or web with a supported extension (%s)' "$1" "$(plugin_dir "$1")" "$PLUGIN_EXTS"
 }
 
-# run an entry file with the arguments after it, under what its extension names
+# run an entry file with the arguments after it, under what its extension names, telling it about tkt and about itself
 plugin_run() {
-  local entry=$1
+  local entry=$1 runner dir
   shift
   case "$entry" in
-    *.sh) TKT_LIB=$TKT_FILE TKT_SELF=$(self_path) bash "$entry" "$@" ;;
+    *.sh) runner=bash ;;
+    *.micropy) runner=micropython ;;
   esac
+  command -v "$runner" >/dev/null || die "$entry needs $runner, which is not on PATH"
+  dir=$(dirname "$entry")
+  TKT_LIB=$TKT_FILE TKT_SELF=$(self_path) TKT_PLUGIN_NAME=$(basename "$dir") TKT_PLUGIN_DIR=$dir \
+    TKT_PLUGIN_URL=/ext/tkt/ext/$(basename "$dir") "$runner" "$entry" "$@"
 }
 
 # the main menu entries of every installed plugin, as <li>s for the skin header, from plugins.<name>.menu in the
@@ -1864,10 +1880,10 @@ plugin_run() {
 # each li carries data-tkt-menu=<name>, which the skin's script turns into a section of its own between dividers.
 # values are escaped for html, and $ for the header's TH1
 plugin_menu() {
-  have_jq && config_ok || return 0
+  have_jq || return 0
   local name entry entries=()
   for name in $(plugin_list); do
-    entry=$(plugin_main "$name") || continue
+    entry=$(plugin_web "$name") || continue
     entries+=(--arg "$name" "$(basename "$entry")")
   done
   config_json | jq -r "${entries[@]}" '
@@ -1892,7 +1908,7 @@ plugin_menu() {
 # works offline. each is fetched once; best effort, since a missing one only leaves its button blank
 plugin_icons() {
   local icon dir=$PLUGINS_DIR/$1/web/icons shipped
-  have_jq && config_ok || return 0
+  have_jq || return 0
   shipped=$(plugin_main "$1") && shipped=$(dirname "$shipped")/web/icons
   for icon in $(config_json | jq -r --arg n "$1" '(.plugins[$n].menu // [])[]? | .icon? // empty | tostring | select(test("^[a-z0-9-]+$"))'); do
     [ -s "$dir/$icon.svg" ] && continue
@@ -1905,7 +1921,9 @@ plugin_icons() {
 plugin_init() {
   local name entry shown rc failed=0
   for name in $(plugin_list); do
-    if ! entry=$(plugin_main "$name"); then
+    if ! entry=$(plugin_entry main "$name"); then
+      # a plugin with only a page has no init to run; one with no entry at all is broken
+      if plugin_main "$name" >/dev/null; then plugin_icons "$name"; continue; fi
       note "init ${E_BOLD}$name${E_OFF}: ${E_RED}failed${E_OFF}: $(plugin_missing "$name"), carrying on"
       failed=$((failed + 1))
       continue
@@ -2700,11 +2718,63 @@ have_jq() { command -v jq >/dev/null; }
 
 # actions live in the config file, .tkt/tkt.json (or an older .tkt.json beside the tracker), under its actions key. jq reads plain json, so whole-line // comments
 # are dropped first, json5-style, which lets the file explain itself; a // inside a value is left alone
-config_json() { sed -e '/^[[:space:]]*\/\//d' "$CONFIG_FILE"; }
-config_ok() { [ -f "$CONFIG_FILE" ] && config_json | jq -e 'type == "object"' >/dev/null 2>&1; }
+config_ok() { [ -f "$CONFIG_FILE" ] && sed -e '/^[[:space:]]*\/\//d' "$CONFIG_FILE" | jq -e 'type == "object"' >/dev/null 2>&1; }
+
+# what tkt offers every tracker before any file says otherwise: the farthest layer of the config
+CONFIG_BUILTIN='{"actions": [{"name": "clean-jobs", "label": "Clean Jobs", "icon": "archive", "command": ["tkt", "action", "clean", "--keep", "0"]}]}'
+
+# one layer of the config: a line naming the plugin the file speaks for, or an empty one, then the file and a separator
+config_layer() { if [ -f "$2" ]; then printf '%s\n' "$1"; cat "$2"; printf '\036'; fi; }
+
+# every config in effect, farthest first: tkt's own, each folder of plugins' file, each plugin's own, then this tracker's
+config_layers() {
+  local home name entry homes=() i
+  printf '\n%s\036' "$CONFIG_BUILTIN"
+  while IFS= read -r home; do homes+=("$home"); done < <(plugin_homes)
+  for ((i = ${#homes[@]} - 1; i >= 0; i--)); do config_layer '' "${homes[$i]}/tkt.json"; done
+  for name in $(plugin_list); do
+    entry=$(plugin_main "$name") || continue
+    config_layer "$name" "$(dirname "$entry")/tkt.json"
+  done
+  config_layer '' "${CONFIG_FILE:-}"
+}
+
+# the one rule that merges the layers, nearer over farther; the README states it under the config's layers
+CONFIG_MERGE='
+def id: if type == "object" then (.name // .label) else null end;
+def records: type == "array" and length > 0 and all(.[]; type == "object");
+def merge($b):
+  if type == "object" and ($b | type) == "object" then
+    reduce ($b | keys_unsorted[]) as $k (.; .[$k] = (if has($k) then (.[$k] | merge($b[$k])) else $b[$k] end))
+  elif type == "array" and ($b | type) == "array" and ((. + $b) | records) then
+    . as $a
+    | [$a[] | . as $r | first(($b[] | select(id != null and id == ($r | id))), $r)]
+      + [$b[] | . as $r | select(id == null or ($a | all(.[]; id != ($r | id))))]
+  else $b end;
+def live:
+  if type == "array" then map(select((type == "object" and .enabled == false) | not) | live)
+  elif type == "object" then map_values(live) else . end;
+reduce (split("\u001e")[] | select(length > 0) | split("\n") as $l
+        | ($l[1:] | map(select(test("^\\s*//") | not)) | join("\n") | try fromjson catch null) as $doc
+        | select($doc | type == "object")
+        | if $l[0] == "" then $doc else {plugins: {($l[0]): $doc}} end) as $layer ({}; merge($layer))
+| live'
+
+config_json() { config_layers | jq -Rs "$CONFIG_MERGE"; }
+
+# the files the config is read from besides this tracker's own, nearest first, for a page that shows where things come from
+config_inherited() {
+  local home name entry
+  for name in $(plugin_list); do
+    entry=$(plugin_main "$name") || continue
+    [ ! -f "$(dirname "$entry")/tkt.json" ] || printf '%s\n' "$(dirname "$entry")/tkt.json"
+  done
+  while IFS= read -r home; do [ ! -f "$home/tkt.json" ] || printf '%s\n' "$home/tkt.json"; done < <(plugin_homes)
+}
+
 actions_json() {
-  [ -f "$CONFIG_FILE" ] || return 0
-  if ! config_ok; then note "$CONFIG_FILE is not valid json, even without its // comments, so there are no actions"; return 0; fi
+  have_jq || return 0
+  if [ -f "${CONFIG_FILE:-}" ] && ! config_ok; then note "$CONFIG_FILE is not valid json, even without its // comments, so it is ignored"; fi
   # the actions are the top-level ones, then those of each installed plugin under plugins.<name>.actions, in
   # plugin_list order; a plugin that is not installed contributes none. where two share a name, the first wins.
   # a skill action is shorthand for the agent running the tkt skill on the ticket: its words follow /tkt {ticket},
@@ -2767,7 +2837,6 @@ default_config() {
 {
 //"agent": ["claude", "-p", "{prompt}", "--permission-mode", "dontAsk", "--allowedTools", "Bash(tkt:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob"],
   "actions": [
-    {"name": "clean-jobs", "label": "Clean Jobs", "icon": "archive", "command": ["tkt", "action", "clean", "--keep", "0"]}
   ]
 }
 EOF
@@ -2817,7 +2886,7 @@ init_config() {
   if [ -e "$CONFIG_FILE" ]; then return 0; fi
   mkdir -p "$(dirname "$CONFIG_FILE")"
   default_config >"$CONFIG_FILE"
-  note "project actions: wrote $CONFIG_FILE, with Clean Jobs and the format in its comments"
+  note "project actions: wrote $CONFIG_FILE, with the format in its comments; it adds to what tkt and its plugins give"
 }
 
 # a ticket relates to a job in three ways, each with one rule:
@@ -2973,7 +3042,7 @@ verb_action() {
     list|ls)
       [ $# -le 1 ] || action_usage
       old_actions_page
-      if [ -f "$CONFIG_FILE" ]; then note "actions from $CONFIG_FILE"; else note "no $CONFIG_FILE, so no actions; tkt init writes a starting one"; fi
+      if [ -f "$CONFIG_FILE" ]; then note "actions from $CONFIG_FILE, over what tkt and its plugins give"; else note "no $CONFIG_FILE, so only what tkt and its plugins give; tkt init writes a starting one"; fi
       actions | awk -F'\t' 'BEGIN { print "| Action | Label | Icon | Scope | Comment | Command |"; print "| --- | --- | --- | --- | --- | --- |" }
         { c = $6; for (i = 7; i <= NF; i++) c = c " " $i; printf "| %s | %s | %s | %s | %s | `%s` |\n", $1, $2, ($5 == "-" ? "" : $5), $4, ($3 == "comment" ? "yes" : ""), c }' | paint ;;
     run)
@@ -3161,6 +3230,9 @@ route_index() {
   card_open tkt-card-config "Config <span class=\"tkt-card-meta\" id=\"config\"><code>$(htmls "$CONFIG_FILE")</code></span>"
   if [ -f "$CONFIG_FILE" ]; then printf '<pre>%s</pre>\n' "$(html <"$CONFIG_FILE")"
   else printf '<p>No config yet; <code>tkt init</code> writes a starting one.</p>\n'; fi
+  printf '<p class="tkt-config-layers">It adds to what tkt itself gives'
+  while IFS= read -r src; do printf ', and <code>%s</code>' "$(htmls "$src")"; done < <(config_inherited)
+  printf '.</p>\n'
   card_close
 }
 
@@ -3247,7 +3319,7 @@ route_plugin() {
   case "$name" in ''|tkt|*[!a-z0-9_-]*) cgi_fail 404 "no plugin $name" ;; esac
   if [ -n "$rest" ]; then case "/$rest/" in */../*|*/./*|*//*) cgi_fail 400 "bad path: $rest" ;; esac; fi
   plugin_dir "$name" >/dev/null || cgi_fail 404 "no plugin $name"
-  entry=$(plugin_main "$name") || cgi_fail 404 "$(plugin_missing "$name")"
+  entry=$(plugin_web "$name") || cgi_fail 404 "$(plugin_missing "$name")"
   base=$(basename "$entry")
   # the entry's own name, or nothing after the plugin's, is its page; what follows the name is the page's own path
   case "$rest" in
@@ -3293,9 +3365,12 @@ main() {
       # any other verb naming an installed plugin runs that plugin, with TKT_DB set so it finds this same tracker
       locate
       if [ "$verb" != tkt ] && plugin_dir "$verb" >/dev/null; then
-        entry=$(plugin_main "$verb") || die "$(plugin_missing "$verb")"
-        TKT_DB=$REPO plugin_run "$entry" "$@"
-        return
+        if entry=$(plugin_entry main "$verb"); then
+          TKT_DB=$REPO plugin_run "$entry" "$@"
+          return
+        fi
+        # a plugin with only a page offers no command, so its name is no verb
+        plugin_main "$verb" >/dev/null || die "$(plugin_missing "$verb")"
       fi
       usage >&2; die "unknown verb: $verb" ;;
   esac
