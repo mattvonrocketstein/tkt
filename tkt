@@ -152,9 +152,10 @@ use_repo() {
   JOBS_DIR=$TKT_DIR/jobs                # one directory per action run
   PID_FILE=$TKT_DIR/tkt.pid             # the running server's pid and port
   DOTENV_FILE=$PROJECT_DIR/.env         # TKT_PORT; read, never sourced
-  EXT_DIR=$TKT_DIR/ext                  # fossil's extroot, holding a link to this script and one dir per extension
-  BIN_DIR=$TKT_DIR/bin                  # a link per extension to its main, made by init
-  DATA_DIR=$TKT_DIR/data                # content init seeds, by kind: wiki/<page>.md
+  HOME_DIR=${TKT_HOME:-$TKT_DIR}        # what tkt ships, below; the tkt binary names its own copy in TKT_HOME
+  EXT_DIR=$HOME_DIR/ext                 # fossil's extroot, holding a link to this script and one dir per extension
+  BIN_DIR=$HOME_DIR/bin                 # a link per extension to its main, made by init
+  DATA_DIR=$HOME_DIR/data               # content init seeds, by kind: wiki/<page>.md
 }
 
 # for a plugin that sources tkt: its name and the paths that hang off it. the name is the directory holding the
@@ -167,7 +168,7 @@ plugin_use() {
   PLUGIN_DIR=$EXT_DIR/$PLUGIN_NAME      # main, and what fossil serves for it
   PLUGIN_JS=$PLUGIN_DIR/js
   PLUGIN_CSS=$PLUGIN_DIR/css
-  PLUGIN_SQL=$TKT_DIR/sql/$PLUGIN_NAME  # not under ext, so fossil never serves it
+  PLUGIN_SQL=$HOME_DIR/sql/$PLUGIN_NAME # not under ext, so fossil never serves it
   PLUGIN_URL=/ext/$PLUGIN_NAME          # where fossil serves PLUGIN_DIR, below the repository's root url
 }
 
@@ -2178,8 +2179,10 @@ open_when_up() {
   ) </dev/null >/dev/null 2>&1 &
 }
 
-# this script's own absolute path, links resolved, for fossil to run as CGI
+# this script's own absolute path, links resolved, for fossil to run as CGI; under the tkt binary it is that binary,
+# which the launcher names in TKT_SELF, since the script it unpacked is only a part of it
 self_path() {
+  if [ -n "${TKT_SELF:-}" ] && [ -z "$TKT_SOURCED" ]; then printf '%s' "$TKT_SELF"; return; fi
   local p=$0
   case "$p" in */*) ;; *) p=$(command -v "$p") ;; esac
   (cd "$(dirname "$p")" && printf '%s/%s' "$(pwd -P)" "$(basename "$p")")
@@ -2291,11 +2294,11 @@ skill_md() {
   skill_core
   [ -n "${TKT_DIR:-}" ] || return 0
   for name in $(plugin_list); do
-    [ -f "$TKT_DIR/skill/$name.md" ] || continue
+    [ -f "$HOME_DIR/skill/$name.md" ] || continue
     if [ -n "$first" ]; then printf '\n## Plugins\n\nEach installed plugin adds a section; run one as `tkt <plugin> ...`.\n'; first=; fi
     printf '\n'
     # a plugin's ## headings become ### and so on, nesting it under Plugins
-    sed 's/^#/##/' "$TKT_DIR/skill/$name.md"
+    sed 's/^#/##/' "$HOME_DIR/skill/$name.md"
   done
 }
 

@@ -4,6 +4,7 @@ import json
 import os
 import pty
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -13,7 +14,16 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "tkt"
 BASH = shutil.which(os.environ.get("TKT_BASH", "bash"))
-TOOLS = "fossil sed mktemp mkdir mv rm dirname basename ps grep sleep cat sh".split()
+# the tkt under test, as an argv: this checkout's script by default, or a distribution such as TKT_CMD="sh /abs/tkt.com"
+TKT = shlex.split(os.environ.get("TKT_CMD", "")) or [BASH, str(SCRIPT)]
+# what tkt names as itself, for {tkt}, the CGI link, and a job's PATH: the script, or the distribution's binary
+SELF = Path(TKT[-1]).resolve()
+# a bare fossil, for the few fixtures that build a repo tkt has never touched
+FOSSIL = shlex.split(os.environ.get("TKT_FOSSIL", "fossil"))
+# a test that reaches inside the script, such as swapping the fossil it finds on PATH, which a distribution pins to its own
+script_only = pytest.mark.skipif(bool(os.environ.get("TKT_CMD")), reason="reaches inside the tkt script; TKT_CMD names a distribution")
+# a distribution carries its own fossil, so the host's is linked only when there is one
+TOOLS = [t for t in "fossil sed mktemp mkdir mv rm dirname basename ps grep sleep cat sh".split() if shutil.which(t)]
 
 
 def run(*args, db=None, input="", cwd=None, path=None, extra=None):
@@ -26,7 +36,7 @@ def run(*args, db=None, input="", cwd=None, path=None, extra=None):
     env.setdefault("TKT_CDN", "file:///nonexistent/tkt-cdn")
     env.update(extra or {})
     return subprocess.run(
-        [BASH, str(SCRIPT), *args],
+        [*TKT, *args],
         input=input,
         capture_output=True,
         text=True,
@@ -41,7 +51,7 @@ def run_tty(*args, db, **env):
     full.update(TKT_DB=str(db), TERM="xterm-256color")
     full.update(env)
     parent, child = pty.openpty()
-    proc = subprocess.Popen([BASH, str(SCRIPT), *args], stdin=subprocess.DEVNULL, stdout=child, stderr=child, env=full)
+    proc = subprocess.Popen([*TKT, *args], stdin=subprocess.DEVNULL, stdout=child, stderr=child, env=full)
     os.close(child)
     out = b""
     while True:
@@ -140,7 +150,7 @@ def no_git_path(tmp_path):
 
 
 def plain_fossil(path):
-    subprocess.run(["fossil", "init", str(path)], check=True, capture_output=True)
+    subprocess.run([*FOSSIL, "init", str(path)], check=True, capture_output=True)
     return path
 
 
@@ -247,10 +257,9 @@ class TestInit:
         assert tkt.ok("run", "uv", "list") == before
 
     def test_empties_the_old_guide_page(self, tkt):
-        subprocess.run(["fossil", "wiki", "create", "agents/FormattingHelp", "-", "--mimetype", "text/x-markdown", "-R", str(tkt.db)],
-                       input="# old guide\n", text=True, check=True, capture_output=True)
+        tkt.ok("run", "wiki", "create", "agents/FormattingHelp", "-", "--mimetype", "text/x-markdown", input="# old guide\n")
         assert "emptied the agents/FormattingHelp wiki page" in tkt("init").stderr
-        page = subprocess.run(["fossil", "wiki", "export", "agents/FormattingHelp", "-R", str(tkt.db)], capture_output=True, text=True).stdout
+        page = tkt.ok("run", "wiki", "export", "agents/FormattingHelp")
         assert page.strip() == ""
 
     def test_tracker_without_version_row_is_accepted(self, tkt):
@@ -336,7 +345,7 @@ class TestHighlight:
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        p = subprocess.Popen([BASH, str(SCRIPT), "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db)},
+        p = subprocess.Popen([*TKT, "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db)},
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             assert p.stdout.readline().startswith("http://localhost:")
@@ -426,6 +435,7 @@ class TestOfflineAssets:
         r = run("init", db=tkt.db, cwd=tkt.cwd, extra={"TKT_HIGHLIGHT": "0", "TKT_MERMAID": "0"})
         assert "page scripts" not in r.stderr
 
+    @script_only
     def test_a_failing_store_does_not_break_init(self, tkt, tmp_path):
         env = self.mirror(tmp_path / "cdn", {"prism/1.29.0/components/prism-go.min.js": "go"})
         bin = tmp_path / "bin"
@@ -495,7 +505,7 @@ class TestGithubLinks:
             port = s.getsockname()[1]
             tkt.fails("serve", f"port={port}", match="is taken")
             assert "tkt-github" not in config(tkt.db, "header")
-        p = subprocess.Popen([BASH, str(SCRIPT), "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db)},
+        p = subprocess.Popen([*TKT, "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db)},
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             assert p.stdout.readline().startswith("http://localhost:")
@@ -522,7 +532,7 @@ class TestServeOpensBrowser:
         full = {k: v for k, v in os.environ.items() if k != "TKT_DB"}
         full.update(TKT_DB=str(tkt.db), BROWSER=str(browser), **env)
         parent, child = pty.openpty()
-        proc = subprocess.Popen([BASH, str(SCRIPT), "serve", f"port={port}"], stdin=subprocess.DEVNULL, stdout=child, stderr=child, env=full, cwd=tkt.cwd)
+        proc = subprocess.Popen([*TKT, "serve", f"port={port}"], stdin=subprocess.DEVNULL, stdout=child, stderr=child, env=full, cwd=tkt.cwd)
         os.close(child)
         try:
             for _ in range(100):
@@ -558,7 +568,7 @@ class TestServeOpensBrowser:
         browser = tmp_path / "browser"
         browser.write_text(f"#!/bin/sh\nprintf '%s' \"$1\" >{seen}\n")
         browser.chmod(0o755)
-        p = subprocess.Popen([BASH, str(SCRIPT), "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db), "BROWSER": str(browser)},
+        p = subprocess.Popen([*TKT, "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db), "BROWSER": str(browser)},
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             assert p.stdout.readline().startswith("http://localhost:")
@@ -996,6 +1006,7 @@ class TestSql:
         tkt.ok("sql", examples[1])
 
 
+@script_only
 class TestLibrary:
     """Sourced, tkt is a library: it defines functions and runs nothing, so a plugin can use its helpers."""
 
@@ -1302,8 +1313,7 @@ class TestActions:
         assert ".tkt.json is not valid json" in r.stderr
 
     def test_the_old_wiki_page_is_ignored_with_a_note(self, tkt):
-        subprocess.run(["fossil", "wiki", "create", "config/Actions", "-", "--mimetype", "text/x-markdown", "-R", str(tkt.db)],
-                       input="```json\n[{\"name\": \"wiki\", \"command\": [\"true\"]}]\n```\n", text=True, check=True, capture_output=True)
+        tkt.ok("run", "wiki", "create", "config/Actions", "-", "--mimetype", "text/x-markdown", input="```json\n[{\"name\": \"wiki\", \"command\": [\"true\"]}]\n```\n")
         r = tkt("action", "list")
         assert "| wiki |" not in r.stdout
         assert "config/Actions wiki page is no longer read" in r.stderr
@@ -1396,12 +1406,12 @@ class TestActions:
 
     def test_tkt_placeholder_is_this_script(self, tkt):
         self.put(tkt, {"name": "self", "command": ["echo", "{tkt}"]})
-        assert tkt.ok("action", "run", "self").strip() == str(SCRIPT)
+        assert tkt.ok("action", "run", "self").strip() == str(SELF)
 
     def test_plain_tkt_in_a_job_is_this_one(self, tkt):
         self.put(tkt, {"name": "which", "command": ["sh", "-c", "command -v tkt; tkt version"]})
         found, version = tkt.ok("action", "run", "which").splitlines()
-        assert found == str(tkt.db.parent / ".tkt" / "ext" / "tkt") and Path(found).resolve() == SCRIPT
+        assert found == str(tkt.db.parent / ".tkt" / "ext" / "tkt") and Path(found).resolve() == SELF
         assert version.startswith("tkt ")
 
     def test_tkt_inside_a_job_says_so(self, tkt):
@@ -1609,7 +1619,7 @@ class TestActionsServed:
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        p = subprocess.Popen([BASH, str(SCRIPT), "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db), "TKT_OPEN": "0"},
+        p = subprocess.Popen([*TKT, "serve", f"port={port}"], cwd=tkt.cwd, env={**os.environ, "TKT_DB": str(tkt.db), "TKT_OPEN": "0"},
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         base = f"http://localhost:{port}"
         try:
@@ -1618,7 +1628,7 @@ class TestActionsServed:
                     if s.connect_ex(("127.0.0.1", port)) == 0:
                         break
                 time.sleep(0.1)
-            assert Path(str(tkt.db.parent / ".tkt" / "ext" / "tkt")).resolve() == SCRIPT
+            assert Path(str(tkt.db.parent / ".tkt" / "ext" / "tkt")).resolve() == SELF
             page = urllib.request.urlopen(f"{base}/ext/tkt?ticket={id}").read().decode()
             assert "<title>" in page and "<button title=\"Hi\">Hi</button>" in page
             req = urllib.request.Request(f"{base}/ext/tkt/run/hi", data=f"ticket={id}".encode(), headers={"Referer": f"{base}/tktview/{id}"})

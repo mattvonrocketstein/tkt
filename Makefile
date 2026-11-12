@@ -10,7 +10,7 @@ DOCS_REPO ?= mattvonrocketstein/tkt
 DOCS_PORT ?= 6419
 MDHEADERS = $(PYTHON) docs/tools/mdheaders.py --img $(DOCS_IMG)
 
-.PHONY: clean init build test install skill docs docs.headers docs.check docs.test docs.serve
+.PHONY: clean init build test install skill docs docs.headers docs.check docs.test docs.serve ape ape.%
 .SILENT:
 
 clean:
@@ -71,3 +71,10 @@ docs.serve:
 	command -v gh >/dev/null || { echo "tkt: docs.serve renders through gh api, and gh is not on PATH" >&2; exit 1; }
 	echo "tkt: serving docs at http://localhost:$(DOCS_PORT)/" >&2
 	$(PYTHON) docs/tools/preview.py $(DOCS_REPO) $(DOCS_PORT)
+
+# tkt as an actually portable executable, fossil and the tkt script and .tkt in one file; the targets live in ape/Makefile, reached as ape.<target>.
+ape:
+	$(MAKE) -C ape tkt
+
+ape.%:
+	$(MAKE) -C ape $*
