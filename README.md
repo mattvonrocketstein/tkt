@@ -175,7 +175,7 @@ For the browser, see [Web UI](#web-ui).
 | `tkt wiki put <page> [--base <v>]` | Create or replace a page from stdin, always as markdown; unchanged text is skipped; `--base` refuses if the page changed since that version |
 | `tkt wiki rm <page> [--base <v>]` | Retire a page; fossil keeps its history |
 | `tkt wiki cp <template> <new-page>` | Start a page from a `templates/` page; another source needs `--force`; alias `copy` |
-| `tkt action list` | The [project actions](#actions), from `.tkt.json`; needs jq |
+| `tkt action list` | The [project actions](#actions), from `.tkt/tkt.json`; needs jq |
 | `tkt action run <name> [<id>]` | Run one as its web button does, streaming its log; exits with its code |
 | `tkt action clean [--keep <n>]` | Retire all but the newest `n` finished jobs, 20 by default, to `$TMPDIR/tkt-jobs/` |
 | `tkt skill [install [--project]]` | Print or install the [Claude Code Skill](#skill) |
@@ -285,7 +285,7 @@ http://localhost:9080/ticket
 
 A second line names the tracker and the server's pid, then fossil's own startup line follows.
 
-Each tracker has at most one server. The command records the server's pid and port in `.tkt.fossil.pid` beside the tracker, and a later `serve`, from any terminal, stops that server before starting its own. `tkt stop` ends it from anywhere, and `tkt status` prints its url. The server listens on localhost only, and requests from localhost are logged in as the admin user.
+Each tracker has at most one server. The command records the server's pid and port in `.tkt/tkt.pid` beside the tracker, and a later `serve`, from any terminal, stops that server before starting its own. `tkt stop` ends it from anywhere, and `tkt status` prints its url. The server listens on localhost only, and requests from localhost are logged in as the admin user.
 
 ```bash
 tkt serve port=9000
@@ -317,7 +317,7 @@ nohup tkt serve >/dev/null 2>&1 &
 
 Actions are buttons that run project commands on the server: tests, a build, a deploy check. They show on every ticket and on the actions page at `/ext/tkt`, behind the settings icon in the menu, and `tkt action run` runs the same ones from the command line. They need [jq](https://jqlang.org).
 
-They are configured in `.tkt.json` beside the tracker, under its `actions` key. The file is json once its whole-line `//` comments are dropped, so it can explain itself. `tkt init` writes a starting one when there is none, holding the format in its comments and one action, **Clean Jobs**; it never touches a file that exists. The old `config/Actions` wiki page is no longer read, and `tkt init` and `tkt action list` say so while it exists.
+They are configured in `.tkt/tkt.json` beside the tracker, under its `actions` key; an older `.tkt.json` beside the tracker is still read while `.tkt/tkt.json` is missing. The file is json once its whole-line `//` comments are dropped, so it can explain itself. `tkt init` writes a starting one when there is none, holding the format in its comments and one action, **Clean Jobs**; it never touches a file that exists. The old `config/Actions` wiki page is no longer read, and `tkt init` and `tkt action list` say so while it exists.
 
 ```js
 // Test runs for the ticket at hand.
@@ -369,9 +369,9 @@ tkt action run test
 tkt action run grep 1f3a9c
 ```
 
-Each run is a job, kept in `.tkt.fossil.jobs/` beside the tracker with its command, log, and exit code. A button starts the job in the background and opens its page, which follows the log until it ends; long logs show their last 200 lines, with a link to the rest. A job already running is not started twice: a project action runs once at a time, a ticket action once per ticket, and its button opens the running job instead. Jobs end with the server when it is stopped with Ctrl-C. Clean Jobs, or `tkt action clean`, moves all but the newest 20 finished jobs, directory and record alike, to `$TMPDIR/tkt-jobs/<project>/`: nothing is deleted, and the system clears its temp dir in its own time. It never moves a running job.
+Each run is a job, kept in `.tkt/jobs/` beside the tracker (`tkt init` moves an old `.tkt.fossil.jobs/` there) with its command, log, and exit code. A button starts the job in the background and opens its page, which follows the log until it ends; long logs show their last 200 lines, with a link to the rest. A job already running is not started twice: a project action runs once at a time, a ticket action once per ticket, and its button opens the running job instead. Jobs end with the server when it is stopped with Ctrl-C. The Clean Jobs button moves every finished job, directory and record alike, and `tkt action clean` all but the newest 20, or `--keep <n>`, to `$TMPDIR/tkt-jobs/<project>/`: nothing is deleted, and the system clears its temp dir in its own time. It never moves a running job.
 
-Fossil serves the actions by running `tkt` itself as a CGI extension: `tkt serve` links it into `.tkt.fossil.ext/` and passes `--extroot`. A server started some other way, such as `fossil ui`, has no actions, and the ticket page simply shows no buttons.
+Fossil serves the actions by running `tkt` itself as a CGI extension: `tkt serve` links it into `.tkt/ext/` and passes `--extroot`. A server started some other way, such as `fossil ui`, has no actions, and the ticket page simply shows no buttons.
 
 <a id="init-changes"></a>
 ### What Init Changes

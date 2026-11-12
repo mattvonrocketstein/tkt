@@ -12,8 +12,8 @@ are an append-only log beside it. Both are markdown.
 
 Beyond plain markdown, both render ```` ```mermaid ```` and ```` ```pikchr ```` fences as diagrams and
 highlight fences that name a language. A bare `[<hash>]` links to that ticket. Prefer a diagram
-or a highlighted fence to ascii art. The full rules are on the tracker's `agents/FormattingHelp` wiki
-page (`tkt status` prints the url; the page is `/wiki?name=agents/FormattingHelp`).
+or a highlighted fence to ascii art. The full rules are in the tracker's formatting guide
+(`tkt status` prints the url; the guide is `/uv/help/formatting.md`).
 
 Run `tkt help` for the full verb list. This skill covers how to use it well.
 
@@ -29,9 +29,7 @@ The **active ticket** is the one most recently shown, filed, or changed in this 
 | *(none)* | Run `tkt triage` and summarize it in a few lines. Name the active ticket, if any. |
 | one hex word of 4+ characters matching exactly one ticket | Run `tkt show <id>` and summarize it: the problem, its state, and what is owed. It becomes the active ticket. |
 | such a hex word, then an instruction | That ticket becomes the active ticket; follow the instruction for it, as below. Project actions run this way, as `/tkt <id> groom`. |
-| `wiki map [focus]`, `map [focus]` | Work on the project's `Mapping` page; see *Map and diagram* below. |
-| `wiki system [focus]`, `diagram [focus]` | Work on the project's `SystemDiagrams` page; see *Map and diagram* below. |
-| `wiki ...` (anything else) | Treat it as a free-form instruction about the wiki. Read `agents/Home` first. |
+| a first word that a plugin section's *When invoked as* table lists | Follow that section, under *Plugins* below. |
 | anything else | An instruction about the active ticket. First state the active ticket's id and title; if there is none, ask which ticket. Named instructions follow. |
 
 Named instructions:
@@ -50,21 +48,6 @@ Named instructions:
     ticket (`tkt comment <id>`). Otherwise reply in the session and post nothing.
 - `close`: close only when the rules under *Closing* hold; otherwise say what is still owed.
 - `note <text>`: add `<text>` as a comment, tidied into the ticket's voice.
-
-### Map and diagram
-
-The page is `Mapping` or `SystemDiagrams`. If it does not exist, start it with
-`tkt wiki cp templates/<Name> <Name>`. Read `agents/Home` and the page, then follow its
-*Conventions* and *Instructions*.
-
-These jobs have no natural end, so work in bounded passes:
-
-- With a focus (`/tkt map the serve lifecycle`), cover that focus. Without one, pick the most
-  useful gap: an empty section, the *Unknowns* list, or the area the conversation is about.
-- Stop after one substantial pass: about two sections, or one area explored in depth. Save
-  with `tkt wiki put <Name> --base <version>` before stopping.
-- Then report: what you added or changed, what is still missing, and the focus you suggest
-  for the next pass. Do not start that pass unasked.
 
 ## Before the first call
 
@@ -217,44 +200,24 @@ Each tracker has one server: a new `tkt serve`, from any terminal, stops the old
 - **What the human can do there:** file, edit, comment on, close, and reopen tickets.
   Blockers and parents are command-line only.
 
-## Wiki
-
-The tracker's wiki holds the project pages agents keep current. Start every wiki task at
-`agents/Home`: it lists the pages and the rules for them.
-
-| Intent | Command |
-| --- | --- |
-| List pages | `tkt wiki ls`, or `tkt wiki ls templates` |
-| Read a page | `tkt wiki get <page>`; stderr gives its version |
-| Write a page | `tkt wiki put <page> --base <version> <<'EOF'` ... |
-| Start a page from a template | `tkt wiki cp templates/<Name> <Name>` |
-| Retire a page | `tkt wiki rm <page> --base <version>` |
-
-- Always `get` before `put`, and pass the version it printed as `--base`, so a human's edit made
-  in between is never overwritten. When `put` reports the page changed, `get` it again and redo
-  the edit on the new text.
-- `put` replaces the whole page. Carry forward everything that still holds, including the
-  page's *Conventions* section.
-- Never write `agents/` pages, which humans own. `--force` exists for when the human asks.
-- Use `cp` only from `templates/`. Fill the copy in; leave the template as it is.
-
 ## Actions
 
 Project actions are commands the human can run from buttons in the web ui. `tkt action list`
 shows them; `tkt action run <name> [<id>]` runs one as its button does, streaming its log and
 exiting with its code. They need jq.
 
-- They come from the `actions` key of `.tkt.json` beside the tracker: json once its whole-line `//`
-  comments are dropped. Each is `{"name", "label", "icon", "command": [argv...], "comment"}`; `{ticket}`,
-  `{repo}`, and `{tkt}` (tkt's own path) are filled in, `icon` is a tabler icon name, and `comment: true`
-  posts the result to the ticket the run started from. The `config/Actions` wiki page is no longer read.
+- They come from the `actions` key of `.tkt/tkt.json` beside the tracker, or of an older `.tkt.json` there
+  when `.tkt/tkt.json` is missing: json once its whole-line `//` comments are dropped. Each is
+  `{"name", "label", "icon", "command": [argv...], "comment"}`; `{ticket}`, `{repo}`, and `{tkt}` (tkt's own
+  path) are filled in, `icon` is a tabler icon name, and `comment: true` posts the result to the ticket the
+  run started from. The `config/Actions` wiki page is no longer read.
 - `"skill": ["groom"]` instead of a command runs the top-level `agent` argv with its `{prompt}` set to
   `/tkt {ticket} groom`, so such a job may be you, running this skill.
 - An action whose command uses `{ticket}` is a ticket action and needs an id; any other is a
   project action, where an id is optional and only says which ticket gets the comment.
   `tkt action list` shows each one's scope.
 - Add or change actions only when the human asks: they run commands on their machine.
-  Never edit `.tkt.json` unasked.
+  Never edit the config file unasked.
 - `tkt action clean [--keep <n>]` retires old finished jobs to the temp dir; it deletes nothing.
 - Prefer an existing action over an ad-hoc command when it does what the human wants, so the
   run lands in the same job history the web ui shows.

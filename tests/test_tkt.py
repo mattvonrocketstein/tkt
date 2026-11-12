@@ -1,5 +1,6 @@
 """Interface tests for the tkt script, each against a fresh tracker copied from one initialized template."""
 
+import json
 import os
 import pty
 import re
@@ -12,7 +13,7 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "tkt"
 BASH = shutil.which(os.environ.get("TKT_BASH", "bash"))
-TOOLS = "fossil sed mktemp rm dirname basename ps grep sleep cat sh".split()
+TOOLS = "fossil sed mktemp mkdir mv rm dirname basename ps grep sleep cat sh".split()
 
 
 def run(*args, db=None, input="", cwd=None, path=None, extra=None):
@@ -99,6 +100,27 @@ def tkt(template, tmp_path):
     db = tmp_path / "tracker.fossil"
     shutil.copy(template, db)
     return Tracker(db, tmp_path)
+
+
+# this repository's own .tkt/, where the plugins and their files live
+PLUGINS = SCRIPT.parent / ".tkt"
+
+
+# lay out plugins beside a tracker as a project has them: .tkt/ext/<name> with the link to tkt, and each one's
+# .tkt/sql/<name>, .tkt/skill/<name>.md, and the shared .tkt/data. a later tkt init then runs their inits
+def install_plugins(root, *names):
+    dot = root / ".tkt"
+    (dot / "ext").mkdir(parents=True, exist_ok=True)
+    if not (dot / "ext" / "tkt").exists():
+        (dot / "ext" / "tkt").symlink_to(SCRIPT)
+    for name in names:
+        shutil.copytree(PLUGINS / "ext" / name, dot / "ext" / name, dirs_exist_ok=True)
+        if (PLUGINS / "sql" / name).is_dir():
+            shutil.copytree(PLUGINS / "sql" / name, dot / "sql" / name, dirs_exist_ok=True)
+        if (PLUGINS / "skill" / f"{name}.md").is_file():
+            (dot / "skill").mkdir(exist_ok=True)
+            shutil.copy(PLUGINS / "skill" / f"{name}.md", dot / "skill" / f"{name}.md")
+    shutil.copytree(PLUGINS / "data", dot / "data", dirs_exist_ok=True)
 
 
 @pytest.fixture
@@ -215,40 +237,21 @@ class TestInit:
         assert "| old |" in tkt.show(a) and "## Parent" in tkt.show(a)
 
     def test_seeds_formatting_guide_once(self, tkt):
-        def page():
-            return subprocess.run(["fossil", "wiki", "export", "agents/FormattingHelp", "-R", str(tkt.db)],
-                                  capture_output=True, text=True).stdout
-        def versions():
-            return tkt.sql("select count(*) from tagxref join tag using(tagid) where tagname='wiki-agents/FormattingHelp';")
-        assert "```mermaid" in page() and "`python`" in page()
-        agent = subprocess.run(["fossil", "wiki", "export", "agents/Home", "-R", str(tkt.db)], capture_output=True, text=True).stdout
-        assert "templates/SystemDiagrams" in agent and "Keep pages current" in agent
+        # an unversioned file, not a wiki page, replaced only when its text changes
+        guide = tkt.ok("run", "uv", "cat", "help/formatting.md")
+        assert "```mermaid" in guide and "`python`" in guide
+        assert tkt.sql("select count(*) from tag where tagname='wiki-agents/FormattingHelp';").strip() == "0"
         assert tkt.sql("select count(*) from reportfmt where title='Wiki Pages';").strip() == "1"
-        before = versions()
+        before = tkt.ok("run", "uv", "list")
         tkt.ok("init")
-        assert versions() == before
+        assert tkt.ok("run", "uv", "list") == before
 
-    def test_seeds_template_only_when_missing(self, tkt):
-        def page():
-            return subprocess.run(["fossil", "wiki", "export", "templates/SystemDiagrams", "-R", str(tkt.db)],
-                                  capture_output=True, text=True).stdout
-        assert "*Instructions:*" in page()
-        term = subprocess.run(["fossil", "wiki", "export", "templates/Lexicon", "-R", str(tkt.db)], capture_output=True, text=True).stdout
-        assert "## Avoid" in term
-        style = subprocess.run(["fossil", "wiki", "export", "templates/Style", "-R", str(tkt.db)], capture_output=True, text=True).stdout
-        assert "## Tooling" in style
-        flows = subprocess.run(["fossil", "wiki", "export", "templates/Workflows", "-R", str(tkt.db)], capture_output=True, text=True).stdout
-        assert "## Recover" in flows
-        mapping = subprocess.run(["fossil", "wiki", "export", "templates/Mapping", "-R", str(tkt.db)], capture_output=True, text=True).stdout
-        assert "## Unknowns" in mapping
-        subprocess.run(["fossil", "wiki", "commit", "templates/SystemDiagrams", "-", "--mimetype", "text/x-markdown", "-R", str(tkt.db)],
-                       input="# filled in\n", text=True, check=True, capture_output=True)
-        subprocess.run(["fossil", "wiki", "commit", "agents/Home", "-", "--mimetype", "text/x-markdown", "-R", str(tkt.db)],
-                       input="# ours\n", text=True, check=True, capture_output=True)
-        tkt.ok("init")
-        assert page().strip() == "# filled in"
-        home = subprocess.run(["fossil", "wiki", "export", "agents/Home", "-R", str(tkt.db)], capture_output=True, text=True).stdout
-        assert home.strip() == "# ours"
+    def test_empties_the_old_guide_page(self, tkt):
+        subprocess.run(["fossil", "wiki", "create", "agents/FormattingHelp", "-", "--mimetype", "text/x-markdown", "-R", str(tkt.db)],
+                       input="# old guide\n", text=True, check=True, capture_output=True)
+        assert "emptied the agents/FormattingHelp wiki page" in tkt("init").stderr
+        page = subprocess.run(["fossil", "wiki", "export", "agents/FormattingHelp", "-R", str(tkt.db)], capture_output=True, text=True).stdout
+        assert page.strip() == ""
 
     def test_tracker_without_version_row_is_accepted(self, tkt):
         tkt.sql("delete from config where name='tkt-version';")
@@ -279,8 +282,9 @@ class TestInit:
         assert config(tkt.db, "index-page") == "/ticket"
         assert config(tkt.db, "default-skin") == ""
         menu = config(tkt.db, "mainmenu")
-        for entry in ("Reports /ticket", "{Project Wiki} /rptview?title=Wiki+Pages j"):
-            assert entry in menu
+        assert "Reports /ticket" in menu
+        # the wiki's entries come from the wiki plugin's menu config, not the core menu
+        assert "Project Wiki" not in menu
         # recent activity is the title link, so it has no menu entry
         assert "Recent Activity" not in menu
         assert "skin=" not in menu
@@ -364,8 +368,9 @@ PRISM_CORE = "prism/1.29.0/components/prism-core.min.js"
 MERMAID_JS = "mermaid/12.3.0/mermaid.min.js"
 
 
+# the page scripts init stored; the formatting guide, also unversioned, is not one of them
 def stored(tkt):
-    return tkt.sql("select name from unversioned order by name;").split()
+    return tkt.sql("select name from unversioned where name not like 'help/%' order by name;").split()
 
 
 class TestOfflineAssets:
@@ -991,90 +996,72 @@ class TestSql:
         tkt.ok("sql", examples[1])
 
 
-class TestWiki:
-    def version(self, tkt, page):
-        r = tkt("wiki", "show", page)
+class TestLibrary:
+    """Sourced, tkt is a library: it defines functions and runs nothing, so a plugin can use its helpers."""
+
+    def source(self, script, db=None, args=(), extra=None):
+        env = {k: v for k, v in os.environ.items() if k != "TKT_DB"}
+        if db is not None:
+            env["TKT_DB"] = str(db)
+        env.update(extra or {})
+        # the caller's own arguments must not reach tkt's command parser
+        return subprocess.run([BASH, "-c", f'source "$0"\n{script}', str(SCRIPT), *args],
+                              capture_output=True, text=True, env=env)
+
+    def test_sourcing_runs_nothing(self):
+        r = self.source("echo loaded", args=("bogus-verb", "x"))
         assert r.returncode == 0, r.stderr
-        return re.search(r"at version ([0-9a-f]{10})", r.stderr).group(1)
+        assert r.stdout == "loaded\n" and r.stderr == ""
 
-    def test_put_creates_then_updates_and_show_prints_it(self, tkt):
-        r = tkt("wiki", "put", "notes/Plan", input="# Plan\n\none\n")
-        assert r.returncode == 0 and "created notes/Plan" in r.stderr
-        assert tkt.ok("wiki", "show", "notes/Plan") == "# Plan\n\none\n"
-        r = tkt("wiki", "put", "notes/Plan", input="# Plan\n\ntwo\n")
-        assert "updated notes/Plan" in r.stderr
-        assert "two" in tkt.ok("wiki", "show", "notes/Plan")
+    def test_sourcing_ignores_cgi_variables(self):
+        r = self.source("echo loaded", extra={"GATEWAY_INTERFACE": "CGI/1.0", "FOSSIL_REPOSITORY": "x.fossil"})
+        assert r.stdout == "loaded\n" and "Status:" not in r.stdout
 
-    def test_put_stores_markdown_and_skips_unchanged_text(self, tkt):
-        tkt.ok("wiki", "put", "notes/Plan", input="# Plan\n")
-        r = tkt("wiki", "put", "notes/Plan", input="# Plan\n")
-        assert "unchanged" in r.stderr
-        assert tkt.sql("select count(*) from event where type='w' and substr(comment,2)='notes/Plan';") == "1"
-        uuid = tkt.sql("select b.uuid from event e join blob b on b.rid=e.objid where e.type='w' and substr(e.comment,2)='notes/Plan';")
-        assert "N text/x-markdown" in tkt.ok("run", "artifact", uuid)
+    def test_sourcing_leaves_shell_options_alone(self):
+        r = self.source('case $- in *e*) echo errexit;; esac; shopt -qo pipefail && echo pipefail; false; echo survived')
+        assert r.stdout == "survived\n"
 
-    def test_put_refuses_an_empty_body(self, tkt):
-        tkt.fails("wiki", "put", "notes/Plan", input="  \n", match="tkt wiki rm")
+    def test_helpers_work_after_locate(self, tkt):
+        t = tkt.new("from a plugin")
+        r = self.source('set -eo pipefail; locate; need; sqlq "select title from ticket;"; resolve ' + t[:6] + '; echo; lit "o\'brien"',
+                        db=tkt.db)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == f"from a plugin\n{t}\n'o''brien'"
 
-    def test_put_rewrites_bare_ticket_hashes(self, tkt):
-        id = tkt.new("linked")
-        tkt.ok("wiki", "put", "notes/Plan", input=f"see [{id}]\n")
-        assert f"[]({id})" in tkt.ok("wiki", "show", "notes/Plan")
+    def test_use_repo_derives_every_path(self, tmp_path):
+        r = self.source('use_repo /p/x/.tkt.fossil; printf "%s\\n" "$REPO" "$PROJECT_DIR" "$CONFIG_FILE" "$DOTENV_FILE" "$EXT_DIR" "$JOBS_DIR" "$PID_FILE"')
+        assert r.stdout.split() == ["/p/x/.tkt.fossil", "/p/x", "/p/x/.tkt/tkt.json", "/p/x/.env",
+                                    "/p/x/.tkt/ext", "/p/x/.tkt/jobs", "/p/x/.tkt/tkt.pid"]
 
-    def test_base_refuses_a_stale_write(self, tkt):
-        tkt.ok("wiki", "put", "notes/Plan", input="one\n")
-        v = self.version(tkt, "notes/Plan")
-        tkt.ok("wiki", "put", "notes/Plan", "--base", v, input="two\n")
-        tkt.fails("wiki", "put", "notes/Plan", "--base", v, input="three\n", match="changed since version")
-        tkt.fails("wiki", "rm", "notes/Plan", "--base", v, match="changed since version")
-        assert "two" in tkt.ok("wiki", "show", "notes/Plan")
+    def test_find_repo_search_order(self, tmp_path):
+        top = tmp_path / "top"
+        (top / "a" / "b").mkdir(parents=True)
+        (top / ".tkt.fossil").write_text("")
+        def find(cwd, db=None):
+            env = {k: v for k, v in os.environ.items() if k != "TKT_DB"}
+            if db:
+                env["TKT_DB"] = db
+            return subprocess.run([BASH, "-c", 'source "$0"; find_repo', str(SCRIPT)], capture_output=True,
+                                  text=True, env=env, cwd=cwd).stdout
+        # the nearest tracker here or above; TKT_DB, relative to here, wins over it
+        assert find(top / "a" / "b") == str(top / ".tkt.fossil")
+        assert find(top / "a", db="own.fossil") == str(top / "a" / "own.fossil")
+        # with none above, where init would make one: outside git, here
+        lone = tmp_path / "lone"
+        lone.mkdir()
+        assert find(lone) == str(lone / ".tkt.fossil")
 
-    def test_rm_hides_the_page_from_show_and_list(self, tkt):
-        tkt.ok("wiki", "put", "notes/Plan", input="one\n")
-        tkt.ok("wiki", "rm", "notes/Plan")
-        tkt.fails("wiki", "show", "notes/Plan", match="no wiki page")
-        assert "notes/Plan" not in tkt.ok("wiki", "list")
-        tkt.fails("wiki", "rm", "notes/Plan", match="no wiki page")
-        tkt.ok("wiki", "put", "notes/Plan", input="back\n")
-        assert "back" in tkt.ok("wiki", "show", "notes/Plan")
-
-    def test_list_filters_by_prefix(self, tkt):
-        tkt.ok("wiki", "put", "notes/Plan", input="x\n")
-        tkt.ok("wiki", "put", "notesy", input="x\n")
-        out = tkt.ok("wiki", "list", "notes")
-        assert "| notes/Plan |" in out and "notesy" not in out and "templates/" not in out
-        assert "| templates/Style |" in tkt.ok("wiki", "list")
-
-    def test_copy_starts_a_page_from_a_template(self, tkt):
-        tkt.ok("wiki", "copy", "templates/Style", "Style")
-        assert tkt.ok("wiki", "show", "Style") == tkt.ok("wiki", "show", "templates/Style")
-        tkt.fails("wiki", "copy", "templates/Style", "Style", match="already exists")
-        tkt.fails("wiki", "copy", "templates/Nope", "Nope", match="no wiki page")
-        tkt.fails("wiki", "cp", "Style", "Style2", match="not a template")
-        tkt.ok("wiki", "cp", "Style", "Style2", "--force")
-        assert tkt.ok("wiki", "get", "Style2") == tkt.ok("wiki", "show", "Style")
-        assert "| Style2 |" in tkt.ok("wiki", "ls")
-
-    def test_agents_pages_need_force(self, tkt):
-        tkt.fails("wiki", "put", "agents/Home", input="x\n", match="--force")
-        tkt.fails("wiki", "rm", "agents/Home", match="--force")
-        tkt.fails("wiki", "copy", "templates/Style", "agents/Style", match="--force")
-        tkt.ok("wiki", "put", "agents/Home", "--force", input="# ours\n")
-        assert tkt.ok("wiki", "show", "agents/Home") == "# ours\n"
-
-    def test_rejects_bad_names_and_usage(self, tkt):
-        tkt.fails("wiki", "put", "branch/trunk", input="x\n", match="reserves")
-        tkt.fails("wiki", "put", "/lead", input="x\n", match="bad page name")
-        tkt.fails("wiki", "show", match="usage: tkt wiki")
-        tkt.fails("wiki", "put", "x", "--bogus", input="x\n", match="usage: tkt wiki")
-        tkt.fails("wiki", match="usage: tkt wiki")
+    def test_running_still_works(self, tkt):
+        assert tkt("list").returncode == 0
+        assert run("bogus-verb", db=tkt.db).returncode != 0
 
 
 class TestSkill:
     SOURCE = SCRIPT.parent / "skills" / "tkt" / "SKILL.md"
 
-    def test_bundled_copy_matches_repository(self):
-        assert run("skill").stdout == self.SOURCE.read_text()
+    def test_bundled_copy_matches_repository(self, tmp_path):
+        # outside any project, so no plugin adds a section to tkt's own part
+        assert run("skill", cwd=tmp_path).stdout == self.SOURCE.read_text()
 
     def test_install_for_user(self, tmp_path):
         r = run("skill", "install", extra={"HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": ""})
@@ -1153,7 +1140,7 @@ class TestColor:
 
     def test_help_is_colored_on_terminal_with_the_same_text(self, tkt):
         out = run_tty("help", db=tkt.db)
-        assert "\x1b[1mwiki\x1b[0m" in out and "\x1b[36m<id>\x1b[0m" in out and "\x1b[33m$EDITOR" in out
+        assert "\x1b[1maction\x1b[0m" in out and "\x1b[36m<id>\x1b[0m" in out and "\x1b[33m$EDITOR" in out
         plain = re.sub(r"\x1b\[[0-9]+m", "", out).replace("\r", "")
         assert plain == run("help").stdout
         assert "\x1b[" not in run("help").stdout
@@ -1174,10 +1161,11 @@ class TestServer:
         tkt.fails("status", match="nothing serving")
 
     def test_stale_pid_file_is_ignored(self, tkt):
-        Path(f"{tkt.db}.pid").write_text("1 9080\n")
+        (tkt.db.parent / ".tkt").mkdir(exist_ok=True)
+        (tkt.db.parent / ".tkt" / "tkt.pid").write_text("1 9080\n")
         tkt.fails("status", match="nothing serving")
         tkt.ok("stop")
-        assert not Path(f"{tkt.db}.pid").exists()
+        assert not (tkt.db.parent / ".tkt" / "tkt.pid").exists()
 
     def test_bad_port_fails(self, tkt):
         tkt.fails("serve", "port=abc", match="not a port")
@@ -1191,7 +1179,7 @@ class TestServer:
             port = s.getsockname()[1]
             err = tkt.fails("serve", f"port={port}", match=f"port {port} is taken")
         assert "port=<n>" in err and "TKT_PORT" in err and ".env" in err
-        assert not Path(f"{tkt.db}.pid").exists()
+        assert not (tkt.db.parent / ".tkt" / "tkt.pid").exists()
 
     def test_dotenv_port_is_read_not_sourced(self, tkt):
         import socket
@@ -1259,7 +1247,7 @@ class TestActions:
         put_actions(tkt, actions_page(*actions))
 
     def jobs(self, tkt):
-        return sorted(Path(f"{tkt.db}.jobs").iterdir())
+        return sorted((tkt.db.parent / ".tkt" / "jobs").iterdir())
 
     def test_none_configured(self, tkt):
         (tkt.db.parent / ".tkt.json").unlink(missing_ok=True)
@@ -1268,12 +1256,12 @@ class TestActions:
         assert "tkt init writes a starting one" in r.stderr
 
     def test_init_writes_a_default_with_clean_jobs(self, tkt):
-        conf = tkt.db.parent / ".tkt.json"
+        conf = tkt.db.parent / ".tkt" / "tkt.json"
         conf.unlink(missing_ok=True)
         assert "wrote " + str(conf) in tkt("init").stderr
         assert conf.read_text().startswith("// tkt project actions")
         r = tkt("action", "list")
-        assert "| clean-jobs | Clean Jobs | archive | project |  | `tkt action clean --keep 20` |" in r.stdout
+        assert "| clean-jobs | Clean Jobs | archive | project |  | `tkt action clean --keep 0` |" in r.stdout
         assert "from " + str(conf) in r.stderr
 
     def test_init_never_overwrites_the_config(self, tkt):
@@ -1281,6 +1269,21 @@ class TestActions:
         conf.write_text("mine")
         tkt.ok("init")
         assert conf.read_text() == "mine"
+
+    def test_dot_tkt_config_is_preferred_over_the_old_file(self, tkt):
+        self.put(tkt, {"name": "old", "command": ["true"]})
+        new = tkt.db.parent / ".tkt" / "tkt.json"
+        new.parent.mkdir(exist_ok=True)
+        new.write_text(json.dumps({"actions": [{"name": "new", "command": ["true"]}]}))
+        out = tkt.ok("action", "list")
+        assert "| new |" in out and "| old |" not in out
+
+    def test_init_moves_the_old_jobs_and_ext_dirs(self, tkt):
+        for old, new in ((".jobs", "jobs"), (".ext", "ext")):
+            (Path(f"{tkt.db}{old}") / "j1").mkdir(parents=True)
+        tkt.ok("init")
+        for old, new in ((".jobs", "jobs"), (".ext", "ext")):
+            assert not Path(f"{tkt.db}{old}").exists() and (tkt.db.parent / ".tkt" / new / "j1").is_dir()
 
     def test_listed_from_the_file(self, tkt):
         self.put(tkt, {"name": "hi", "label": "Say hi", "icon": "hand-stop", "comment": True, "command": ["echo", "hi", "{ticket}"]})
@@ -1299,13 +1302,14 @@ class TestActions:
         assert ".tkt.json is not valid json" in r.stderr
 
     def test_the_old_wiki_page_is_ignored_with_a_note(self, tkt):
-        tkt.ok("wiki", "put", "config/Actions", input="```json\n[{\"name\": \"wiki\", \"command\": [\"true\"]}]\n```\n")
+        subprocess.run(["fossil", "wiki", "create", "config/Actions", "-", "--mimetype", "text/x-markdown", "-R", str(tkt.db)],
+                       input="```json\n[{\"name\": \"wiki\", \"command\": [\"true\"]}]\n```\n", text=True, check=True, capture_output=True)
         r = tkt("action", "list")
         assert "| wiki |" not in r.stdout
         assert "config/Actions wiki page is no longer read" in r.stderr
 
     def test_clean_retires_all_but_the_newest(self, tkt, tmp_path):
-        jobs = Path(f"{tkt.db}.jobs")
+        jobs = tkt.db.parent / ".tkt" / "jobs"
         for i in range(5):
             d = jobs / f"2026010{i}-000000-x"
             d.mkdir(parents=True)
@@ -1368,7 +1372,7 @@ class TestActions:
     def test_a_ticket_action_needs_a_ticket(self, tkt):
         self.put(tkt, {"name": "tick", "command": ["echo", "{ticket}"]})
         tkt.fails("action", "run", "tick", match="tick is a ticket action")
-        assert not Path(f"{tkt.db}.jobs").exists()
+        assert not (tkt.db.parent / ".tkt" / "jobs").exists()
 
     def test_a_project_action_takes_a_ticket_as_context(self, tkt):
         id = tkt.new("target")
@@ -1397,7 +1401,7 @@ class TestActions:
     def test_plain_tkt_in_a_job_is_this_one(self, tkt):
         self.put(tkt, {"name": "which", "command": ["sh", "-c", "command -v tkt; tkt version"]})
         found, version = tkt.ok("action", "run", "which").splitlines()
-        assert found == f"{tkt.db}.ext/tkt" and Path(found).resolve() == SCRIPT
+        assert found == str(tkt.db.parent / ".tkt" / "ext" / "tkt") and Path(found).resolve() == SCRIPT
         assert version.startswith("tkt ")
 
     def test_tkt_inside_a_job_says_so(self, tkt):
@@ -1453,7 +1457,7 @@ class TestActionsCgi:
         h, _ = cgi(tkt, "/run/hi", body=f"ticket={ticket}")
         assert h["Status"] == "303 See Other"
         job = self.job_of(h)
-        wait_for(Path(f"{tkt.db}.jobs") / job / "exit")
+        wait_for((tkt.db.parent / ".tkt" / "jobs") / job / "exit")
         _, page = cgi(tkt, f"/job/{job}")
         assert "exit 0" in page and f"hi {ticket}" in page
         assert "tkt-reload" not in page
@@ -1468,13 +1472,13 @@ class TestActionsCgi:
             _, page = cgi(tkt, f"/job/{first}")
             assert "running" in page and '<meta name="tkt-reload" content="2">' in page
         finally:
-            pid = int((Path(f"{tkt.db}.jobs") / first / "pid").read_text())
+            pid = int(((tkt.db.parent / ".tkt" / "jobs") / first / "pid").read_text())
             os.kill(pid, 9)
             subprocess.run(["pkill", "-9", "-f", "^sleep 30$"])
 
     def test_a_killed_job_shows_as_died(self, tkt, ticket):
         job = self.job_of(cgi(tkt, "/run/slow", body="ticket=")[0])
-        pid = int((Path(f"{tkt.db}.jobs") / job / "pid").read_text())
+        pid = int(((tkt.db.parent / ".tkt" / "jobs") / job / "pid").read_text())
         os.kill(pid, 9)
         subprocess.run(["pkill", "-9", "-f", "^sleep 30$"])
         time.sleep(0.2)
@@ -1485,7 +1489,7 @@ class TestActionsCgi:
 
     def test_long_logs_show_their_tail(self, tkt, ticket):
         job = self.job_of(cgi(tkt, "/run/noisy", body="ticket=")[0])
-        wait_for(Path(f"{tkt.db}.jobs") / job / "exit")
+        wait_for((tkt.db.parent / ".tkt" / "jobs") / job / "exit")
         _, page = cgi(tkt, f"/job/{job}")
         assert "last 200 of 500 lines" in page and "<pre>301\n" in page and "\n300\n" not in page
         _, page = cgi(tkt, f"/job/{job}", "full=1")
@@ -1493,7 +1497,7 @@ class TestActionsCgi:
 
     def test_job_page_is_cards_linking_back(self, tkt, ticket):
         job = self.job_of(cgi(tkt, "/run/hi", body=f"ticket={ticket}")[0])
-        wait_for(Path(f"{tkt.db}.jobs") / job / "exit")
+        wait_for((tkt.db.parent / ".tkt" / "jobs") / job / "exit")
         _, page = cgi(tkt, f"/job/{job}")
         assert 'class="tkt-card tkt-card-fields"' in page and 'class="tkt-card tkt-card-log"' in page
         assert 'class="tkt-fold"' in page and 'class="tkt-copy"' in page
@@ -1525,7 +1529,7 @@ class TestActionsCgi:
             p = self.job_of(cgi(tkt, "/run/slow", body=f"ticket={ticket}")[0])
             assert self.job_of(cgi(tkt, "/run/slow", body=f"ticket={other}")[0]) == p
         finally:
-            for job in Path(f"{tkt.db}.jobs").iterdir():
+            for job in (tkt.db.parent / ".tkt" / "jobs").iterdir():
                 try:
                     os.kill(int((job / "pid").read_text()), 9)
                 except ProcessLookupError:
@@ -1535,12 +1539,12 @@ class TestActionsCgi:
 
     def test_job_page_says_where_the_comment_went(self, tkt, ticket):
         job = self.job_of(cgi(tkt, "/run/hi", body=f"ticket={ticket}")[0])
-        wait_for(Path(f"{tkt.db}.jobs") / job / "exit")
+        wait_for((tkt.db.parent / ".tkt" / "jobs") / job / "exit")
         _, page = cgi(tkt, f"/job/{job}")
         assert f"Comment:</td><td class=\"tktDspValue\">posted to {ticket}" in page
         put_actions(tkt, actions_page({"name": "proj", "comment": True, "command": ["true"]}))
         job = self.job_of(cgi(tkt, "/run/proj", body="ticket=")[0])
-        wait_for(Path(f"{tkt.db}.jobs") / job / "exit")
+        wait_for((tkt.db.parent / ".tkt" / "jobs") / job / "exit")
         _, page = cgi(tkt, f"/job/{job}")
         assert "not posted: no ticket" in page
 
@@ -1548,7 +1552,7 @@ class TestActionsCgi:
         _, page = cgi(tkt)
         assert "No jobs yet." in page
         job = self.job_of(cgi(tkt, "/run/hi", body=f"ticket={ticket}")[0])
-        wait_for(Path(f"{tkt.db}.jobs") / job / "exit")
+        wait_for((tkt.db.parent / ".tkt" / "jobs") / job / "exit")
         _, page = cgi(tkt)
         assert 'class="tkt-card tkt-card-report"' in page and '<table class="report">' in page
         assert f'<a href="/ext/tkt/job/{job}">{job}</a>' in page and f'<a href="/tktview/{ticket}">{ticket}</a>' in page
@@ -1578,10 +1582,10 @@ class TestActionsCgi:
     def test_jobs_get_the_server_users_home_and_local_bin(self, tkt):
         put_actions(tkt, actions_page({"name": "env", "command": ["sh", "-c", "echo $HOME; echo $PATH"]}))
         job = cgi(tkt, "/run/env", body="ticket=")[0]["Location"].rsplit("/", 1)[1]
-        wait_for(Path(f"{tkt.db}.jobs") / job / "exit")
-        home, path = (Path(f"{tkt.db}.jobs") / job / "log").read_text().splitlines()
+        wait_for((tkt.db.parent / ".tkt" / "jobs") / job / "exit")
+        home, path = ((tkt.db.parent / ".tkt" / "jobs") / job / "log").read_text().splitlines()
         assert home == os.path.expanduser("~")
-        assert path.split(":")[:2] == [f"{tkt.db}.ext", f"{home}/.local/bin"]
+        assert path.split(":")[:2] == [str(tkt.db.parent / ".tkt" / "ext"), f"{home}/.local/bin"]
 
     def test_header_has_the_page_reload_toggle(self, tkt):
         header = config(tkt.db, "header")
@@ -1614,13 +1618,13 @@ class TestActionsServed:
                     if s.connect_ex(("127.0.0.1", port)) == 0:
                         break
                 time.sleep(0.1)
-            assert Path(f"{tkt.db}.ext/tkt").resolve() == SCRIPT
+            assert Path(str(tkt.db.parent / ".tkt" / "ext" / "tkt")).resolve() == SCRIPT
             page = urllib.request.urlopen(f"{base}/ext/tkt?ticket={id}").read().decode()
             assert "<title>" in page and "<button title=\"Hi\">Hi</button>" in page
             req = urllib.request.Request(f"{base}/ext/tkt/run/hi", data=f"ticket={id}".encode(), headers={"Referer": f"{base}/tktview/{id}"})
             with urllib.request.urlopen(req) as r:
                 assert "/ext/tkt/job/" in r.url
-            [job] = Path(f"{tkt.db}.jobs").iterdir()
+            [job] = (tkt.db.parent / ".tkt" / "jobs").iterdir()
             wait_for(job / "exit")
             assert (job / "log").read_text() == "served\n"
         finally:

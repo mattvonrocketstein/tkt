@@ -1,22 +1,32 @@
 #!/usr/bin/env bash
 
 # tkt: a ticket tracker over fossil, with a mutable description beside an append-only comment log.
-set -eo pipefail
+#
+# Run, it is the tkt command. Sourced (source tkt), it is a library: it defines its functions and settings and does
+# nothing else, so a plugin can use its helpers. It then leaves shell options to the caller, but its functions assume
+# what tkt itself runs with, set -eo pipefail, and most need REPO, which locate sets.
+# return succeeds only at the top level of a sourced file, which tells the two apart even when the caller's $0 is
+# this file's own path
+TKT_SOURCED=
+(return 0 2>/dev/null) && TKT_SOURCED=1
+[ -n "$TKT_SOURCED" ] || set -eo pipefail
 
 TKT_VERSION=0.1.0
 FIELDS='tags blockers parent description'
 GUEST=hjr
-MENU="Reports /ticket r {} {Project Wiki} /rptview?title=Wiki+Pages j {} Login /login !L desktoponly"
+MENU="Reports /ticket r {} Login /login !L desktoponly"
 COLS="substr(tkt_uuid,1,10) || ' | ' || coalesce(nullif(status,''),'-') || ' | ' || coalesce(nullif(severity,''),'-') || ' | ' || coalesce(nullif(trim(tags),''),'-') || ' | ' || coalesce(nullif(title,''),'(untitled)')"
 
 # color only on a terminal, and never when either no-color variable is set or the terminal is dumb
 colorful() { [ -z "${NO_COLOR:-}${NOCOLOR:-}" ] && [ "${TERM:-}" != dumb ] && [ -t "$1" ]; }
-if colorful 2; then E_RED=$'\033[31m' E_DIM=$'\033[2m' E_OFF=$'\033[0m'; fi
+if colorful 2; then E_RED=$'\033[31m' E_GREEN=$'\033[32m' E_BOLD=$'\033[1m' E_DIM=$'\033[2m' E_OFF=$'\033[0m'; fi
 if colorful 1; then PAINT=1; fi
 
-die() { printf '%stkt:%s %s\n' "$E_RED" "$E_OFF" "$*" >&2; exit 1; }
+# the name messages go out under; a script that sources tkt sets its own
+PROG=tkt
+die() { printf '%s%s:%s %s\n' "$E_RED" "$PROG" "$E_OFF" "$*" >&2; exit 1; }
 
-note() { printf '%stkt:%s %s\n' "$E_DIM" "$E_OFF" "$*" >&2; }
+note() { printf '%s%s:%s %s\n' "$E_DIM" "$PROG" "$E_OFF" "$*" >&2; }
 
 # on a terminal, help shows each command's verbs in bold and its placeholders in cyan, with the env variables
 # the descriptions mention in yellow; the first line is bold. piped, it is plain text
@@ -83,20 +93,15 @@ tkt: a ticket tracker over fossil, with a mutable body.
   tkt close <id> [resolution=...]       close, stdin is the closing comment
   tkt clean [--force]                   purge closed tickets, asking first unless forced
   tkt serve [port=...]                  web ui in the foreground, replacing any running one; opens a browser on a terminal, TKT_OPEN=0 to skip.
-                                        project actions show as buttons on each ticket and at /ext/tkt;
                                         code fences are highlighted by prism, TKT_HIGHLIGHT=0 to leave it out;
                                         ```mermaid fences draw as diagrams on pages that have one, TKT_MERMAID=0 to leave it out.
                                         init stores both in the tracker for offline use, else pages load them from cdnjs
   tkt stop                              stop the server started by serve
   tkt status                            print the server url and pid, or fail
   tkt sql <query> | --schema            read-only sql, as markdown; stdin works too
-  tkt wiki ls [prefix]                  wiki pages as markdown, optionally only those under prefix/; alias list
-  tkt wiki get <page>                   a page's markdown; its version goes to stderr; alias show
-  tkt wiki put <page> [--base <v>]      create or replace a page from stdin or $EDITOR; --base refuses if it changed
-  tkt wiki rm <page> [--base <v>]       retire a page, keeping its history
-  tkt wiki cp <template> <new-page>     start a page from a template; other sources need --force; alias copy
-                                        agents/ pages need --force to write, since humans own them
-  tkt action list                       project actions, from the actions key of .tkt.json beside the tracker;
+  tkt <plugin> [args...]                run an installed plugin, .tkt/ext/<plugin>/main, on this tracker; for
+                                        example tkt wiki ls|get|put|rm|cp
+  tkt action list                       project actions, from the actions key of .tkt/tkt.json beside the tracker;
                                         // comment lines are allowed; tkt init writes a default; needs jq
   tkt action run <name> [<id>]          run one as its web button does, streaming its log; exits with its code.
                                         an action whose command uses {ticket} needs an id; for any other, the id
@@ -112,22 +117,65 @@ above; init creates one at the git root, or here outside git.
 EOF
 }
 
-# the nearest tracker at or above here, else a new one at the git root, else here
-locate() {
+# --- where things are. find_repo decides which tracker; use_repo derives every other path from it, so each path is
+# spelled here and nowhere else. a library caller runs locate, or use_repo with a tracker it already knows
+TRACKER_NAME=.tkt.fossil
+
+# the directory a new tracker belongs in: the git root, else here
+project_root() { git rev-parse --show-toplevel 2>/dev/null || pwd; }
+
+# the tracker's path, first match wins: $TKT_DB, relative to here; the nearest .tkt.fossil here or above; else where
+# init would create one, in project_root
+find_repo() {
+  local dir=$PWD
   if [ -n "${TKT_DB:-}" ]; then
-    case "$TKT_DB" in /*) REPO=$TKT_DB ;; *) REPO=$PWD/$TKT_DB ;; esac
+    case "$TKT_DB" in /*) printf '%s' "$TKT_DB" ;; *) printf '%s/%s' "$PWD" "$TKT_DB" ;; esac
     return
   fi
-  local root=$PWD
   while :; do
-    if [ -f "$root/.tkt.fossil" ]; then REPO=$root/.tkt.fossil; return; fi
-    [ "$root" != / ] || break
-    root=$(dirname "$root")
+    if [ -f "$dir/$TRACKER_NAME" ]; then printf '%s/%s' "$dir" "$TRACKER_NAME"; return; fi
+    [ "$dir" != / ] || break
+    dir=$(dirname "$dir")
   done
-  root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$PWD
-  REPO=$root/.tkt.fossil
-  if [ ! -f "$REPO" ] && [ -f "$root/.fossil.db" ] && owned "$root/.fossil.db"; then
-    die "found a tracker under the old name $root/.fossil.db; rename it to .tkt.fossil or set TKT_DB"
+  printf '%s/%s' "$(project_root)" "$TRACKER_NAME"
+}
+
+# REPO, and every path that hangs off it. tkt's own files live in a .tkt/ directory beside the tracker; nothing creates
+# it until something is written there
+use_repo() {
+  REPO=$1
+  PROJECT_DIR=$(dirname "$REPO")        # the directory holding the tracker
+  TKT_DIR=$PROJECT_DIR/.tkt             # tkt's files for this tracker
+  CONFIG_FILE=$TKT_DIR/tkt.json         # project actions and settings
+  # a .tkt.json beside the tracker is still read, while there is no .tkt/tkt.json to prefer
+  if [ ! -f "$CONFIG_FILE" ] && [ -f "$PROJECT_DIR/.tkt.json" ]; then CONFIG_FILE=$PROJECT_DIR/.tkt.json; fi
+  JOBS_DIR=$TKT_DIR/jobs                # one directory per action run
+  PID_FILE=$TKT_DIR/tkt.pid             # the running server's pid and port
+  DOTENV_FILE=$PROJECT_DIR/.env         # TKT_PORT; read, never sourced
+  EXT_DIR=$TKT_DIR/ext                  # fossil's extroot, holding a link to this script and one dir per extension
+  BIN_DIR=$TKT_DIR/bin                  # a link per extension to its main, made by init
+  DATA_DIR=$TKT_DIR/data                # content init seeds, by kind: wiki/<page>.md
+}
+
+# for a plugin that sources tkt: its name and the paths that hang off it. the name is the directory holding the
+# running main, with links resolved, so it is the same whether run as .tkt/bin/<name>, as fossil's CGI, or under
+# another name; pass one to override. needs REPO, so call it after locate or cgi_env
+plugin_use() {
+  local self=$0
+  case "$self" in */*) ;; *) self=$(command -v "$self") ;; esac
+  PLUGIN_NAME=${1:-$(basename "$(dirname "$(readlink -f "$self" 2>/dev/null || printf '%s' "$self")")")}
+  PLUGIN_DIR=$EXT_DIR/$PLUGIN_NAME      # main, and what fossil serves for it
+  PLUGIN_JS=$PLUGIN_DIR/js
+  PLUGIN_CSS=$PLUGIN_DIR/css
+  PLUGIN_SQL=$TKT_DIR/sql/$PLUGIN_NAME  # not under ext, so fossil never serves it
+  PLUGIN_URL=/ext/$PLUGIN_NAME          # where fossil serves PLUGIN_DIR, below the repository's root url
+}
+
+locate() {
+  use_repo "$(find_repo)"
+  # a tracker from before the rename, found where a new one would go
+  if [ -z "${TKT_DB:-}" ] && [ ! -f "$REPO" ] && [ -f "$PROJECT_DIR/.fossil.db" ] && owned "$PROJECT_DIR/.fossil.db"; then
+    die "found a tracker under the old name $PROJECT_DIR/.fossil.db; rename it to $TRACKER_NAME or set TKT_DB"
   fi
 }
 
@@ -540,7 +588,7 @@ EOF
 # the github project behind the tracker's directory, as https://github.com/owner/repo, when origin points there
 github_url() {
   local url
-  url=$(git -C "$(dirname "$REPO")" remote get-url origin 2>/dev/null) || return 1
+  url=$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null) || return 1
   case "$url" in
     git@github.com:*) url=${url#git@github.com:} ;;
     ssh://git@github.com/*) url=${url#ssh://git@github.com/} ;;
@@ -555,7 +603,7 @@ github_url() {
 # the default branch as origin knows it, else main
 github_branch() {
   local ref
-  ref=$(git -C "$(dirname "$REPO")" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) && [ -n "${ref##*/}" ] && printf '%s' "${ref##*/}" || printf main
+  ref=$(git -C "$PROJECT_DIR" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) && [ -n "${ref##*/}" ] && printf '%s' "${ref##*/}" || printf main
 }
 
 # the skin: fossil's built-in blitz, linked from the header rather than copied, plus a dark theme layered on top.
@@ -677,8 +725,9 @@ EOF
 }
 
 skin_header() {
-  local gh=${1:-} links= prism
+  local gh=${1:-} links= prism plugins
   prism=$(mermaid_tags)$(prism_tags)
+  plugins=$(plugin_menu)
   if [ -n "$gh" ]; then
     links="        <li class=\"tkt-github\"><a id=\"tkt-gh\" href=\"$gh\" aria-label=\"GitHub\" aria-haspopup=\"true\"><svg viewBox=\"0 0 16 16\" width=\"16\" height=\"16\" aria-label=\"GitHub\"><path fill=\"currentColor\" d=\"M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z\"/></svg></a><nav id=\"tkt-ghdrop\" class=\"tkt-ghdrop\" title=\"GitHub\"><a href=\"$gh/actions\">Actions</a><a href=\"$gh/issues\">Issues</a><a href=\"$gh/tree/$(github_branch)\">Main</a></nav></li>
 "
@@ -829,13 +878,17 @@ $prism<script nonce="\$nonce">
   function menuGroups(){
     var ul=document.querySelector('.mainmenu ul'); if(!ul) return;
     var G=[['New Ticket','Reports'],['New Wiki Page','Project Wiki'],['Add Action','Project Actions'],['Zoom out','Zoom in','Page Reload','Toggle dark mode'],['GitHub','Fossil Site Map','Login']];
-    var lis=[].slice.call(ul.children), groups=G.map(function(){ return []; });
+    var lis=[].slice.call(ul.children), groups=G.map(function(){ return []; }), plugins=[], byName={};
     lis.forEach(function(li){
+      // a plugin's entries are a section of their own, in their configured order, after the actions
+      var p=li.getAttribute('data-tkt-menu');
+      if(p){ if(!byName[p]) plugins.push(byName[p]=[]); byName[p].push({li:li,rank:byName[p].length}); return; }
       var a=li.querySelector('a'), l=a&&a.getAttribute('aria-label')||'', g=1;
       G.forEach(function(names,i){ names.forEach(function(n){ if(l.indexOf(n)===0) g=i; }); });
       groups[g].push({li:li,rank:G[g].indexOf(G[g].filter(function(n){ return l.indexOf(n)===0; })[0])});
     });
     ul.classList.add('tkt-grouped');
+    groups=groups.slice(0,3).concat(plugins,groups.slice(3));
     groups.filter(function(g){ return g.length; }).forEach(function(g,i){
       g.sort(function(x,y){ return (x.rank<0?99:x.rank)-(y.rank<0?99:y.rank); });
       if(i){ var sep=document.createElement('li'); sep.className='tkt-menusep'; sep.setAttribute('aria-hidden','true'); ul.appendChild(sep); }
@@ -972,7 +1025,7 @@ $prism<script nonce="\$nonce">
       m.insertBefore(all,m.firstChild);
     }
     // fossil's wiki help knows nothing of tkt's diagrams and highlighting, so Help goes to tkt's formatting guide, which links back to it
-    [].forEach.call(m.querySelectorAll('a[href$="/wikihelp"]'),function(h){ h.href=h.href.replace(/\/wikihelp$/,'/wiki?name=agents/FormattingHelp'); });
+    [].forEach.call(m.querySelectorAll('a[href$="/wikihelp"]'),function(h){ h.href=h.href.replace(/\/wikihelp$/,'/uv/help/formatting.md'); });
     var shown=[].some.call(m.children,function(c){ return getComputedStyle(c).display!=='none'; });
     if(document.querySelector('.tkt-card-fields')||!shown) m.classList.add('tkt-bare');
   }
@@ -1052,12 +1105,7 @@ $prism<script nonce="\$nonce">
               set once 0
             }
             if {[string match /* \$url]} {set url \$home\$url}
-            # the wiki sits right beside the github icon, ahead of the theme toggle, the rest follow it
-            if {\$name eq "Project Wiki"} {
-              set wiki [list [list \$name \$url \$class]]
-            } else {
-              set items "\$items [list [list \$name \$url \$class]]"
-            }
+            set items "\$items [list [list \$name \$url \$class]]"
           }
           proc menuicons {items} {
           for {set i [expr {[llength \$items]-1}]} {\$i >= 0} {set i [expr {\$i-1}]} {
@@ -1066,8 +1114,6 @@ $prism<script nonce="\$nonce">
             set ico ""
             if {\$name eq "Reports"} {
               set ico {<path d='M11.18 20.274l-2.18 .726v-8.5l-4.48 -4.928a2 2 0 0 1 -.52 -1.345v-2.227h16v2.172a2 2 0 0 1 -.586 1.414l-4.414 4.414v3'/><path d='M17.8 20.817l-2.172 1.138a.392 .392 0 0 1 -.568 -.41l.415 -2.411l-1.757 -1.707a.389 .389 0 0 1 .217 -.665l2.428 -.352l1.086 -2.193a.392 .392 0 0 1 .702 0l1.086 2.193l2.428 .352a.39 .39 0 0 1 .217 .665l-1.757 1.707l.414 2.41a.39 .39 0 0 1 -.567 .411l-2.172 -1.138z'/>}
-            } elseif {\$name eq "Project Wiki"} {
-              set ico {<path d='M19.875 6.27a2.225 2.225 0 0 1 1.125 1.948v7.284c0 .809 -.443 1.555 -1.158 1.948l-6.75 4.27a2.269 2.269 0 0 1 -2.184 0l-6.75 -4.27a2.225 2.225 0 0 1 -1.158 -1.948v-7.285c0 -.809 .443 -1.554 1.158 -1.947l6.75 -3.98a2.33 2.33 0 0 1 2.25 0l6.75 3.98h-.033z'/><path d='M9 8l1 8l2 -5l2 5l1 -8'/>}
             } elseif {\$name eq "Login"} {
               set ico {<path d='M15 8v-2a2 2 0 0 0 -2 -2h-7a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2 -2v-2'/><path d='M21 12h-13l3 -3'/><path d='M11 15l-3 -3'/>}
             }
@@ -1081,14 +1127,14 @@ $prism<script nonce="\$nonce">
           }
           }
         </th1>
-$links        <th1>if {[info exists wiki]} {menuicons \$wiki}</th1>
-        <th1>
+$links        <th1>
           # the actions group: adding one on the wiki page that configures them, and the project actions page, served by tkt's /ext CGI
           html "<li class='tkt-menuicon actions'><a href='\$home/ext/tkt#config' aria-label='Add Action'><svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M12.483 20.935c-.862 .239 -1.898 -.178 -2.158 -1.252a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c.67 .162 1.08 .65 1.22 1.191'/><path d='M16 19h6'/><path d='M19 16v6'/><path d='M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'/></svg></a></li>\\n"
           set acls "tkt-menuicon actions"
           if {[string match ext* \$current_page]} {set acls "active \$acls"}
           html "<li class='\$acls'><a href='\$home/ext/tkt' aria-label='Project Actions'><svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M13.256 20.473c-.855 .907 -2.583 .643 -2.931 -.79a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c.584 .434 .929 1.02 1.009 1.6'/><path d='M19 16l-2 3h4l-2 3'/><path d='M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'/></svg></a></li>\\n"
         </th1>
+$plugins
         <li class="tkt-themeli"><a id="tkt-theme" href="#" aria-label="Toggle dark mode"><svg class="tkt-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Dark"><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/></svg><svg class="tkt-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Light"><path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/></svg></a></li>
         <th1>
           # the menu entries as tabler icon buttons, floated right beside the others; floats stack right to left, so they go last-first.
@@ -1096,7 +1142,6 @@ $links        <th1>if {[info exists wiki]} {menuicons \$wiki}</th1>
           menuicons \$items
         </th1>
         <th1>if {[anycap n]} {html "<li class='tkt-newli'><a href='\$home/tktnew' aria-label='New Ticket'><svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M6.5 7.5a1 1 0 1 0 2 0a1 1 0 1 0 -2 0'/><path d='M12 21l-7.414 -7.414a2 2 0 0 1 -.586 -1.414v-5.172a3 3 0 0 1 3 -3h5.172a2 2 0 0 1 1.414 .586l7.71 7.71a2.41 2.41 0 0 1 .5 2.719'/><path d='M16 19h6'/><path d='M19 16v6'/></svg></a></li>\\n"}</th1>
-        <th1>if {[anycap f]} {html "<li class='tkt-newli'><a href='\$home/wikinew' aria-label='New Wiki Page'><svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M19 10h-14'/><path d='M5 6h14'/><path d='M14 14h-9'/><path d='M5 18h6'/><path d='M18 15v6'/><path d='M15 18h6'/></svg></a></li>\\n"}</th1>
       </ul>
     </nav>
     <nav id="hbdrop" class='hbdrop' title="sitemap"></nav>
@@ -1302,6 +1347,9 @@ html[data-theme=dark] .tkt-card-foot { border-top-color: #2a3038; }
 .submenu a.sml-new.tkt-wikinew { display: inline-block; }
 .mainmenu li.tkt-newli, .mainmenu li.tkt-menuicon { float: right; position: relative; }
 .mainmenu li.tkt-newli svg, .mainmenu li.tkt-menuicon svg { vertical-align: -0.3em; }
+/* a plugin's tabler icon, from the cdn: masked so it takes the link color and sits like the inline svgs beside it */
+.mainmenu .tkt-menumask { display: inline-block; width: 18px; height: 18px; vertical-align: -0.3em; background-color: currentColor;
+  -webkit-mask: var(--tkt-icon) center / contain no-repeat; mask: var(--tkt-icon) center / contain no-repeat; }
 /* blitz pads each menu link 15px a side, made for words; icons sit closer */
 header .mainmenu li a { padding-left: 6px; padding-right: 6px; }
 .mainmenu li { position: relative; }
@@ -1576,9 +1624,12 @@ DROP TABLE r;
 EOF
 }
 
-# the formatting guide: one markdown page, seeded by init as the wiki page below and linked from the wiki's Help.
-# tkt owns it, so init rewrites it whenever this text changes; local edits to the page do not survive an init
-GUIDE_PAGE='agents/FormattingHelp'
+# the formatting guide: one markdown document for tickets and wiki pages alike, kept by init as the unversioned file
+# below, which fossil serves at /uv/<name> rendered in the skin, and linked from the wiki's Help. it is no wiki page,
+# so it has no edit link or history; init replaces it whenever this text changes
+GUIDE_UV='help/formatting.md'
+# where it was a wiki page, before; init empties that page, which hides it
+OLD_GUIDE_PAGE='agents/FormattingHelp'
 format_guide() {
   local langs
   langs=$(printf '%s\n' $PRISM_LANGS | grep -vx -e clike -e markup-templating | sed 's/^markup$/html/' | sort | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')
@@ -1661,360 +1712,27 @@ Prefer a diagram to ascii art. Both kinds follow the light and dark themes.
 EOF
 }
 
-# seed a tkt-owned page from a function's output, committing only when its text changed so init does not pile up wiki versions
-seed_owned() {
+# keep a tkt-owned unversioned file $1 as a function's output, replacing it only when the text changed. fossil wants a
+# user for uv writes, which a bare environment may not name
+seed_uv() {
   local f
   f=$(mktemp)
   "$2" >"$f"
-  if ! fx wiki export "$1" 2>/dev/null | cmp -s - "$f"; then
-    fx wiki create "$1" "$f" --mimetype text/x-markdown >/dev/null 2>&1 ||
-      fx wiki commit "$1" "$f" --mimetype text/x-markdown >/dev/null
+  if ! fx uv cat "$1" 2>/dev/null | cmp -s - "$f"; then
+    USER=${USER:-$(id -un)} fx uv add "$f" --as "$1" >/dev/null
   fi
   rm -f "$f"
 }
 
-# the steering page: the one fixed place an agent starts from, linking to the pages the project keeps current.
-# init seeds it once (see SEED_ONCE), so a project may tailor it
-agent_home() {
-  cat <<'EOF'
-# Agent Home
-
-Start here. This page is maintained by `tkt` and rewritten by `tkt init`, so do not edit it: put project
-knowledge in the pages it links to.
-
-## Pages
-
-| Page | What it holds | Kept current by |
-| --- | --- | --- |
-| [System Diagrams](/wiki?name=templates/SystemDiagrams) | how the system is built: parts, control flow, data flow, lifecycles | whoever changes what it draws |
-| [Mapping](/wiki?name=templates/Mapping) | working notes from exploring the code, rough and partly unverified, feeding System Diagrams | anyone exploring; promote what settles |
-| [Lexicon](/wiki?name=templates/Lexicon) | the project's vocabulary: domain and system terms, abbreviations, words to avoid | whoever introduces or renames a term |
-| [Style](/wiki?name=templates/Style) | how code, tests, commits, and prose are written here | whoever changes the practice or its tools |
-| [Workflows](/wiki?name=templates/Workflows) | the commands for setup, build, run, test, release, and recovery | whoever changes a command |
-| [Formatting Help](/wiki?name=agents/FormattingHelp) | markdown, links, highlighting, and diagrams on this tracker | `tkt`; read only |
-| [Wiki Pages](/rptview?title=Wiki+Pages) | every wiki page, filterable by prefix: [agents](/rptview?title=Wiki+Pages#prefix=agents), [templates](/rptview?title=Wiki+Pages#prefix=templates) | |
-
-## Standing rules
-
-- **Read before you change.** Read the pages above that touch your task before starting it.
-- **Keep pages current.** Update a page in the same change that makes it wrong. A stale page is worse
-  than none.
-- **Sources, in order of trust:** the code, then the docs and these pages, then tickets. Where they
-  disagree, follow the code and file a ticket about the mismatch.
-- **Describe what exists.** Planned work lives in tickets, not in these pages.
-- **Link, don't repeat.** Link tickets as `[](<hash>)` and other pages by name instead of copying them.
-  Name code paths in backticks.
-- **Keep the headings.** A page's section headings are its structure; keep them even when a section is
-  short.
-
-## Template pages
-
-A page that opens with a **Template** note has not been filled in yet. Fill it in following its
-*Instructions* blocks, then delete that note and those blocks. Keep everything else on the page,
-including its *Conventions* section: those rules hold for every later edit.
-EOF
-}
-
-
-# template pages: project-agnostic starting points that agents fill in. unlike the guide, the project owns them,
-# so init creates each one only when it is missing and never touches it again
-system_diagrams_template() {
-  cat <<'EOF'
-# System Diagrams
-
-> **Template.** This page has not been filled in yet. Follow [Agent Home](/wiki?name=agents/Home) and each
-> *Instructions* block below, then delete this note and the *Instructions* blocks. Keep the
-> *Conventions* section: it governs every later edit to this page.
-
-## Conventions
-
-- **Dialect:** mermaid for every diagram. Use pikchr only where exact placement carries meaning
-  (a physical, network, or memory layout). Never ascii art. See [Formatting Help](/wiki?name=agents/FormattingHelp).
-- **Size:** at most about 12 nodes per diagram. When a picture needs more, draw the coarse version and
-  split the detail into its own subsection with its own diagram.
-- **Names:** label nodes with the names used in the code (module, binary, table, service), so a reader
-  can search for them, and use the same name for the same thing in every diagram on the page.
-- **Plain syntax:** a mermaid diagram that fails to parse shows as plain text with no error. Use simple
-  ids (`api`, `db`), labels in double quotes (`api["HTTP API"]`), no styling, no `click`, no html in labels.
-- **Prose:** one to three sentences under each diagram saying what to notice, not a restatement of every arrow.
-- **Current:** this page draws the system as it is. Change it in the same commit that changes what it draws.
-
-## Overview
-
-*Instructions:* one `flowchart LR` of the whole system: its major parts as nodes, and arrows labelled
-with how they talk (call, http, queue, file, sql). Draw people and outside systems at the edges, using
-the `(( ))` circle shape. Follow it with two or three sentences on what the system is for and who uses it.
-
-## Components
-
-*Instructions:* one entry per node in the overview, as a table with these columns:
-
-| Component | Responsibility | Code | Tickets |
-| --- | --- | --- | --- |
-| `example` | one sentence on what it owns | `src/example/` | [](<hash>) |
-
-Draw a component's insides only when they matter to someone changing it, as a subsection here with its
-own small `flowchart`.
-
-## Control flow
-
-*Instructions:* what drives the system and in what order: entry points (commands, requests, jobs,
-events), what each one calls, and where control branches, retries, or hands off to another process.
-Use a `flowchart TD` with decision nodes (`check{"valid?"}`) for branching inside one process, or a
-`sequenceDiagram` when the story is calls passing between processes. One diagram per important entry
-point, starting with the most used one.
-
-## Data flow
-
-*Instructions:* how data moves and changes shape for the most important operation: where it enters,
-each place it is transformed or stored, and where it leaves. Use a `flowchart LR` with data stores as
-cylinders (`db[("orders")]`) and arrows labelled with what moves along them. If the system has a
-persistent data model, add an `erDiagram` of the main tables or records, keys and relations only.
-
-## Lifecycle
-
-*Instructions:* if anything has states (a process, a request, a record, a ticket), draw them with
-`stateDiagram-v2`: every state, the event or command on each transition, and the start and end states.
-One diagram per thing that has states. Delete this section if nothing does.
-
-## Open questions
-
-*Instructions:* a bullet list of what was unclear, contradictory, or planned while drawing the above,
-each linked to a ticket. File a ticket for any that has none.
-EOF
-}
-
-lexicon_template() {
-  cat <<'EOF'
-# Lexicon
-
-> **Template.** This page has not been filled in yet. Follow [Agent Home](/wiki?name=agents/Home) and each
-> *Instructions* block below, then delete this note and the *Instructions* blocks. Keep the
-> *Conventions* section: it governs every later edit to this page.
-
-## Conventions
-
-- **One meaning per term.** If a word is used two ways, say so in the entry and say which one wins.
-- **The code's spelling.** Give the identifier the code uses for a term (class, table, flag, field) in backticks,
-  so a reader can search for it. Where the code and the docs use different words, list both and mark the one to use.
-- **Short entries.** One or two sentences. Link to [System Diagrams](/wiki?name=templates/SystemDiagrams) or a ticket
-  instead of explaining at length.
-- **Alphabetical** within each section.
-- **Use the terms.** Tickets, commits, and other pages use the preferred term from this page. Add a term here
-  before relying on it elsewhere.
-- **Current:** change an entry in the same commit that changes what it names.
-
-## Domain
-
-*Instructions:* the words the project's users and problem space use, independent of how the code is built.
-One row each:
-
-| Term | Meaning | In code |
-| --- | --- | --- |
-| example | one or two sentences | `Example` |
-
-## System
-
-*Instructions:* names for the parts of this system: components, processes, files, stores, states, and
-the like, using the same names as the System Diagrams page. Same table shape as above.
-
-## Abbreviations
-
-*Instructions:* acronyms and short forms found in the code, docs, and tickets, each with its expansion and
-a link to its row above when it has one.
-
-| Short | Stands for |
-| --- | --- |
-
-## Avoid
-
-*Instructions:* words that are ambiguous, outdated, or wrong here, each with the term to use instead and
-why. Include old names still found in the code or history.
-
-| Avoid | Use instead | Why |
-| --- | --- | --- |
-EOF
-}
-
-style_template() {
-  cat <<'EOF'
-# Style
-
-> **Template.** This page has not been filled in yet. Follow [Agent Home](/wiki?name=agents/Home) and each
-> *Instructions* block below, then delete this note and the *Instructions* blocks. Keep the
-> *Conventions* section: it governs every later edit to this page.
-
-## Conventions
-
-- **Describe the house style as practiced.** Derive rules from the code, config, and history, not from general
-  best practice. Where the codebase is inconsistent, say so and name the side new work follows.
-- **Tools first.** When a formatter, linter, or config file enforces a rule, name the tool, its config file, and
-  the command that runs it, and do not restate its rules here.
-- **Rules with examples.** Each rule is one line, with a short do / don't example where the difference is not obvious.
-- **Only what a newcomer would get wrong.** Skip rules that every competent contributor already follows.
-- **Words** follow [Lexicon](/wiki?name=templates/Lexicon).
-- **Current:** change a rule in the same commit that changes the practice or the tool config.
-
-## Tooling
-
-*Instructions:* formatters, linters, type checkers, and pre-commit hooks: one row each.
-
-| Tool | Config | Command | Enforced in CI |
-| --- | --- | --- | --- |
-| example | `path/to/config` | `make lint` | yes |
-
-## Code
-
-*Instructions:* conventions the tools do not enforce: naming, file and module layout, error handling,
-logging, comments, dependencies, and anything the project does differently from its language's norms.
-
-## Tests
-
-*Instructions:* where tests live, how they are named, the command to run them, and what a change is expected
-to come with (a regression test per bug fix, for example).
-
-## Commits and reviews
-
-*Instructions:* branch names, commit message form, what goes in one commit, and how changes reach the main
-branch. Quote two real commit messages that show the form.
-
-## Writing
-
-*Instructions:* voice and format for docs, comments, tickets, and these pages: tone, tense, heading case,
-line length, and how much to explain.
-EOF
-}
-
-workflows_template() {
-  cat <<'EOF'
-# Workflows
-
-> **Template.** This page has not been filled in yet. Follow [Agent Home](/wiki?name=agents/Home) and each
-> *Instructions* block below, then delete this note and the *Instructions* blocks. Keep the
-> *Conventions* section: it governs every later edit to this page.
-
-## Conventions
-
-- **Commands, not prose.** Each task is the exact command to run, in a `bash` fence, from the repository root
-  unless it says otherwise, with one line on what it does and how long it takes when that is more than a minute.
-- **Verified.** Every command here has been run and works. Mark one you could not run with *(unverified)* and why.
-- **Prefer the project's wrappers.** When a `Makefile`, script, or task runner covers a task, give that, not the
-  raw tool command it calls.
-- **Rules live elsewhere.** Formatting and lint rules belong on [Style](/wiki?name=templates/Style); this page only says
-  how to run the tools.
-- **Current:** change a command in the same commit that changes it.
-
-## Setup
-
-*Instructions:* from a fresh clone to a working build: prerequisites with versions, install steps, and any
-env vars or local config files to create (name the example file to copy, never real secrets).
-
-## Build and run
-
-*Instructions:* how to build, how to run the system locally, and how to tell it is up (a url, a port, a
-log line).
-
-## Test
-
-*Instructions:* how to run all tests, one file, and one test by name, plus anything slow or needing a
-service, and how to skip it.
-
-## Check before committing
-
-*Instructions:* the commands to run before a commit (format, lint, type check, tests), in order, ideally one
-command that runs them all.
-
-## Release
-
-*Instructions:* how a version is cut and shipped, or "not applicable" with a reason.
-
-## Recover
-
-*Instructions:* how to get back to a clean state when something breaks: clean build outputs, reset local
-data, rebuild caches, stop stray processes. Say what each one destroys.
-EOF
-}
-
-mapping_template() {
-  cat <<'EOF'
-# Mapping
-
-> **Template.** This page has not been filled in yet. Follow [Agent Home](/wiki?name=agents/Home) and each
-> *Instructions* block below, then delete this note and the *Instructions* blocks. Keep the
-> *Conventions* section: it governs every later edit to this page.
-
-## Conventions
-
-- **Working notes, not a reference.** This is the raw map of what has been found while exploring the code. It may be
-  messy, partial, and wrong. [System Diagrams](/wiki?name=templates/SystemDiagrams) is the curated picture; this page
-  is where material for it is gathered.
-- **Discovered, not designed.** Record what the code actually contains, as found, with the path or command that
-  shows it. No conceptual or planned parts.
-- **Mark confidence.** Tag each claim *confirmed* (read or ran it), *likely* (inferred from names or partial reading),
-  or *guess*. Upgrade the tag when you check it.
-- **Append freely, prune carefully.** Add findings as you go. Delete a finding only when it is shown wrong, or once it
-  has been promoted, and leave a line saying where it went.
-- **Promote what settles.** When part of the map stops changing, move it into System Diagrams,
-  [Lexicon](/wiki?name=templates/Lexicon), or [Workflows](/wiki?name=templates/Workflows), and link to it from here.
-- **Crude diagrams are fine.** A rough mermaid sketch, even a large one, beats none; tidy it when it is promoted.
-
-## Folders and files
-
-*Instructions:* the directory tree as far as it has been explored, one line per folder or notable file on what it
-appears to hold, with a confidence tag. Note generated, vendored, and dead-looking code. A trimmed `tree` or
-`ls` listing in a `text` fence is a fine start.
-
-## Entry points
-
-*Instructions:* every way execution starts that you have found (binaries, scripts, `main` functions, routes, jobs,
-hooks, tests), with path and confidence.
-
-## Symbols
-
-*Instructions:* the types, functions, tables, config keys, and constants that keep coming up, one row each,
-with where they are defined and a confidence tag.
-
-| Symbol | Kind | Defined at | What it seems to do |
-| --- | --- | --- | --- |
-| `example` | function | `src/example.py:42` | *likely:* one line |
-
-## Useful commands
-
-*Instructions:* commands that helped explore: searches that find things (`grep`/`rg` patterns, `git log -S`),
-introspection and debug flags, ways to dump state, queries against local data. Each with one line on what it
-shows. Everyday build and test commands belong on Workflows; move a command there once it becomes routine.
-
-## Dependencies
-
-*Instructions:* external services, libraries that shape the design, and internal modules that everything imports.
-Which parts depend on which, as found.
-
-## Sketches
-
-*Instructions:* rough diagrams made while exploring, newest first, each with a date and the question it was
-answering.
-
-## Unknowns
-
-*Instructions:* what is still unexplored or unexplained: directories not yet read, code whose purpose is unclear,
-contradictions between findings. Remove an entry when it is answered and record the answer above.
-EOF
-}
-
-# pages the project owns once seeded, each with the function that writes it: init creates a missing one and never
-# touches it again. agents/Home tells agents it is tkt's and not theirs to edit, but humans may tailor it per project
-SEED_ONCE='agents/Home:agent_home templates/SystemDiagrams:system_diagrams_template templates/Lexicon:lexicon_template templates/Style:style_template templates/Workflows:workflows_template templates/Mapping:mapping_template'
-
-seed_templates() {
-  local f t
+# the guide's old wiki page, emptied once so fossil hides it from the page list; its history stays
+old_guide_page() {
+  local f
+  [ -n "$(fx wiki export "$OLD_GUIDE_PAGE" 2>/dev/null)" ] || return 0
   f=$(mktemp)
-  for t in $SEED_ONCE; do
-    fx wiki export "${t%%:*}" >/dev/null 2>&1 && continue
-    "${t##*:}" >"$f"
-    fx wiki create "${t%%:*}" "$f" --mimetype text/x-markdown >/dev/null
-  done
+  fx wiki commit "$OLD_GUIDE_PAGE" "$f" --mimetype text/x-markdown >/dev/null && note "the formatting guide moved to /uv/$GUIDE_UV; emptied the $OLD_GUIDE_PAGE wiki page"
   rm -f "$f"
 }
+
 
 verb_init() {
   command -v fossil >/dev/null || die 'fossil not found; see https://fossil-scm.org for install instructions'
@@ -2025,7 +1743,7 @@ verb_init() {
     *) die "unexpected argument: $1 (only --adopt)" ;;
   esac
   if [ ! -f "$REPO" ]; then
-    fossil init --admin-user "${TKT_USER:-${USER:-fossil}}" --project-name "$(basename "$(dirname "$REPO")")" "$REPO" >&2
+    fossil init --admin-user "${TKT_USER:-${USER:-fossil}}" --project-name "$(basename "$PROJECT_DIR")" "$REPO" >&2
   elif [ -z "$adopt" ] && ! owned "$REPO"; then
     die "$REPO is not a tkt tracker; init would replace its ticket schema, ticket view, and main menu, and give anonymous users read access. Rerun with --adopt to do that anyway"
   fi
@@ -2042,6 +1760,7 @@ verb_init() {
   skin_footer >"$tmp/footer"
   skin_details >"$tmp/details"
   init_config
+  old_paths
   old_actions_page
   reports >"$tmp/reports"
   sqlq "replace into config(name,value,mtime) values('ticket-table',cast(readfile('$tmp/schema') as text),strftime('%s','now'));" \
@@ -2062,11 +1781,80 @@ verb_init() {
   rm -rf "$tmp"
   fx user capabilities nobody "$GUEST" >/dev/null
   fx user capabilities anonymous "$GUEST" >/dev/null
-  seed_owned "$GUIDE_PAGE" format_guide || note "formatting guide: seeding the wiki page failed"
-  seed_templates || note "agent home and template pages: seeding them failed"
+  seed_uv "$GUIDE_UV" format_guide || note "formatting guide: storing /uv/$GUIDE_UV failed"
+  old_guide_page
   fossil rebuild "$REPO" >/dev/null
   init_skill
   note "ready at $REPO"
+  plugin_init
+}
+
+# a plugin is a directory $EXT_DIR/<name> holding an executable main, beside whatever static files it serves (fossil
+# serves the directory as its extroot). one name per line; a directory named tkt is never a plugin
+plugin_list() {
+  local f name
+  for f in "$EXT_DIR"/*/main; do
+    name=$(basename "$(dirname "$f")")
+    [ -f "$f" ] && [ -x "$f" ] && [ "$name" != tkt ] || continue
+    printf '%s\n' "$name"
+  done
+}
+
+# the main menu entries of every installed plugin, as <li>s for the skin header, from plugins.<name>.menu in the
+# config: [{"label", "icon", "tooltip", "url", "cap"}]. icon is a tabler icon name, shown instead of the label and
+# drawn as a mask in the link color, like the built-in icons, from the plugin's own icons/ (see plugin_icons); tooltip defaults to the label, and url to the plugin's
+# main. cap is fossil capability letters, any of which shows the entry (as TH1's anycap); without one it always shows.
+# each li carries data-tkt-menu=<name>, which the skin's script turns into a section of its own between dividers.
+# values are escaped for html, and $ for the header's TH1
+plugin_menu() {
+  have_jq && config_ok || return 0
+  config_json | jq -r '
+    def esc: tostring | @html | gsub("\\$"; "&#36;");
+    (.plugins // {}) as $p | $ARGS.positional[] as $name | ($p[$name].menu // [])[]? | select(type == "object")
+    | (.label // $name | tostring) as $label
+    | (.url // "/ext/\($name)/main" | tostring) as $url
+    | (.cap // "" | tostring | gsub("[^a-zA-Z0-9]"; "")) as $cap
+    | (if $cap != "" then "<th1>enable_output [anycap \($cap)]</th1>" else "" end)
+      + "<li class=\"tkt-menuicon tkt-plugmenu\" data-tkt-menu=\"\($name | esc)\"><a href=\""
+      + (if $url | startswith("/") then "$home" else "" end) + ($url | esc)
+      + "\" aria-label=\"\(.tooltip // $label | esc)\">"
+      + (if .icon then "<span class=\"tkt-menumask\" aria-hidden=\"true\" style=\"--tkt-icon: url(&quot;$home/ext/\($name | esc)/icons/\(.icon | esc).svg&quot;)\"></span>" else ($label | esc) end)
+      + "</a></li>"
+      + (if $cap != "" then "<th1>enable_output 1</th1>" else "" end)' --args $(plugin_list)
+}
+
+# the second tier of init: each plugin gets a link $BIN_DIR/<name> to its main (relative, so it survives a move) and
+# runs `<name> init` with TKT_DB set to this tracker. Each one's output goes to stderr; a failure is reported and init
+# carries on, since a broken plugin is easy to end up with
+# the tabler icons a plugin's menu names, kept as its own assets in $EXT_DIR/<name>/icons/<icon>.svg so the menu
+# works offline. each is fetched once; best effort, since a missing one only leaves its button blank
+plugin_icons() {
+  local icon dir=$EXT_DIR/$1/icons
+  have_jq && config_ok || return 0
+  for icon in $(config_json | jq -r --arg n "$1" '(.plugins[$n].menu // [])[]? | .icon? // empty | tostring | select(test("^[a-z0-9-]+$"))'); do
+    [ -s "$dir/$icon.svg" ] && continue
+    mkdir -p "$dir"
+    curl -fsS "$TABLER_ICONS/$icon.svg" -o "$dir/$icon.svg" 2>/dev/null || { rm -f "$dir/$icon.svg"; note "$1: could not fetch icon $icon"; }
+  done
+}
+
+plugin_init() {
+  local name rc failed=0
+  for name in $(plugin_list); do
+    mkdir -p "$BIN_DIR"
+    ln -sfn "../ext/$name/main" "$BIN_DIR/$name"
+    plugin_icons "$name"
+    note "init ${E_BOLD}$name${E_OFF}: $BIN_DIR/$name init"
+    rc=0
+    TKT_DB=$REPO "$BIN_DIR/$name" init >&2 </dev/null || rc=$?
+    if [ "$rc" = 0 ]; then
+      note "init ${E_BOLD}$name${E_OFF}: ${E_GREEN}ok${E_OFF}"
+    else
+      note "init ${E_BOLD}$name${E_OFF}: ${E_RED}failed (exit $rc)${E_OFF}, carrying on"
+      failed=$((failed + 1))
+    fi
+  done
+  [ "$failed" = 0 ] || note "${E_RED}$failed plugin init(s) failed${E_OFF}; tkt itself is ready"
 }
 
 verb_new() {
@@ -2309,7 +2097,7 @@ verb_search() {
 
 # TKT_PORT from a .env beside the tracker, for a project-local default under the environment; the file is read, never sourced
 dotenv_port() {
-  local f=$(dirname "$REPO")/.env line
+  local f=$DOTENV_FILE line
   [ -f "$f" ] || return 0
   line=$(grep -E '^(export[[:space:]]+)?TKT_PORT=' "$f" | tail -n 1) || return 0
   line=${line#*=}
@@ -2334,7 +2122,7 @@ port_of() {
 # the pid file holds a pid and port, trusted only while that pid is still this tracker's fossil server
 running() {
   local pid port
-  [ -f "$REPO.pid" ] && read -r pid port <"$REPO.pid" || return 1
+  [ -f "$PID_FILE" ] && read -r pid port <"$PID_FILE" || return 1
   case "$pid" in ''|*[!0123456789]*) return 1 ;; esac
   ps -p "$pid" -o command= 2>/dev/null | grep -qF -- "server $REPO" || return 1
   printf '%s %s' "$pid" "$port"
@@ -2343,10 +2131,10 @@ running() {
 halt() {
   local pid port n=0
   read -r pid port <<<"$(running)"
-  if [ -z "$pid" ]; then rm -f "$REPO.pid"; return 1; fi
+  if [ -z "$pid" ]; then rm -f "$PID_FILE"; return 1; fi
   kill "$pid"
   while kill -0 "$pid" 2>/dev/null && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
-  rm -f "$REPO.pid"
+  rm -f "$PID_FILE"
   note "stopped the server on port $port (pid $pid)"
 }
 
@@ -2397,14 +2185,14 @@ self_path() {
   (cd "$(dirname "$p")" && printf '%s/%s' "$(pwd -P)" "$(basename "$p")")
 }
 
-# $REPO.ext holds only a link to this script: fossil's extroot, which runs it as CGI, and the first PATH entry of
+# $EXT_DIR holds only a link to this script: fossil's extroot, which runs it as CGI, and the first PATH entry of
 # every job, so an action that runs plain `tkt`, such as an agent using the tkt skill, gets this one. under CGI
 # self_path is that link, so it is resolved, or the link would point at itself
 ext_link() {
   local me
   me=$(readlink -f "$(self_path)" 2>/dev/null || self_path)
-  mkdir -p "$REPO.ext"
-  [ "$(readlink "$REPO.ext/tkt" 2>/dev/null)" = "$me" ] || ln -sfn "$me" "$REPO.ext/tkt"
+  mkdir -p "$EXT_DIR"
+  [ "$(readlink "$EXT_DIR/tkt" 2>/dev/null)" = "$me" ] || ln -sfn "$me" "$EXT_DIR/tkt"
 }
 
 verb_serve() {
@@ -2412,16 +2200,17 @@ verb_serve() {
   local at url
   at=$(port_of "$@")
   halt || true
-  ! busy "$at" || die "port $at is taken, likely by another project's tkt serve; pass port=<n>, or set TKT_PORT in the environment or in $(dirname "$REPO")/.env"
+  ! busy "$at" || die "port $at is taken, likely by another project's tkt serve; pass port=<n>, or set TKT_PORT in the environment or in $PROJECT_DIR/.env"
   install_header
-  printf '%s %s\n' "$$" "$at" >"$REPO.pid"
+  mkdir -p "$(dirname "$PID_FILE")"
+  printf '%s %s\n' "$$" "$at" >"$PID_FILE"
   url=http://localhost:$at/ticket
   printf '%s\n' "$url"
   note "serving $REPO in the foreground as pid $$; Ctrl-C or tkt stop ends it"
   open_when_up "$at" "$url"
   # fossil runs this script as CGI for /ext/tkt, which serves the project actions
   ext_link
-  exec fossil server "$REPO" --port "$at" --localhost --localauth --extroot "$REPO.ext"
+  exec fossil server "$REPO" --port "$at" --localhost --localauth --extroot "$EXT_DIR"
 }
 
 verb_stop() {
@@ -2496,8 +2285,23 @@ verb_sql() {
   return $rc
 }
 
-# the Claude Code skill, which the test suite keeps identical to the copy under skills/tkt
+# the Claude Code skill: tkt's own part, then a section from each installed plugin that has one
 skill_md() {
+  local name first=1
+  skill_core
+  [ -n "${TKT_DIR:-}" ] || return 0
+  for name in $(plugin_list); do
+    [ -f "$TKT_DIR/skill/$name.md" ] || continue
+    if [ -n "$first" ]; then printf '\n## Plugins\n\nEach installed plugin adds a section; run one as `tkt <plugin> ...`.\n'; first=; fi
+    printf '\n'
+    # a plugin's ## headings become ### and so on, nesting it under Plugins
+    sed 's/^#/##/' "$TKT_DIR/skill/$name.md"
+  done
+}
+
+# tkt's own part of the skill, which the test suite keeps identical to the copy under skills/tkt. plugins contribute
+# theirs from .tkt/skill/<plugin>.md (see skill_md)
+skill_core() {
   cat <<'SKILL_MD'
 ---
 name: tkt
@@ -2513,8 +2317,8 @@ are an append-only log beside it. Both are markdown.
 
 Beyond plain markdown, both render ```` ```mermaid ```` and ```` ```pikchr ```` fences as diagrams and
 highlight fences that name a language. A bare `[<hash>]` links to that ticket. Prefer a diagram
-or a highlighted fence to ascii art. The full rules are on the tracker's `agents/FormattingHelp` wiki
-page (`tkt status` prints the url; the page is `/wiki?name=agents/FormattingHelp`).
+or a highlighted fence to ascii art. The full rules are in the tracker's formatting guide
+(`tkt status` prints the url; the guide is `/uv/help/formatting.md`).
 
 Run `tkt help` for the full verb list. This skill covers how to use it well.
 
@@ -2530,9 +2334,7 @@ The **active ticket** is the one most recently shown, filed, or changed in this 
 | *(none)* | Run `tkt triage` and summarize it in a few lines. Name the active ticket, if any. |
 | one hex word of 4+ characters matching exactly one ticket | Run `tkt show <id>` and summarize it: the problem, its state, and what is owed. It becomes the active ticket. |
 | such a hex word, then an instruction | That ticket becomes the active ticket; follow the instruction for it, as below. Project actions run this way, as `/tkt <id> groom`. |
-| `wiki map [focus]`, `map [focus]` | Work on the project's `Mapping` page; see *Map and diagram* below. |
-| `wiki system [focus]`, `diagram [focus]` | Work on the project's `SystemDiagrams` page; see *Map and diagram* below. |
-| `wiki ...` (anything else) | Treat it as a free-form instruction about the wiki. Read `agents/Home` first. |
+| a first word that a plugin section's *When invoked as* table lists | Follow that section, under *Plugins* below. |
 | anything else | An instruction about the active ticket. First state the active ticket's id and title; if there is none, ask which ticket. Named instructions follow. |
 
 Named instructions:
@@ -2551,21 +2353,6 @@ Named instructions:
     ticket (`tkt comment <id>`). Otherwise reply in the session and post nothing.
 - `close`: close only when the rules under *Closing* hold; otherwise say what is still owed.
 - `note <text>`: add `<text>` as a comment, tidied into the ticket's voice.
-
-### Map and diagram
-
-The page is `Mapping` or `SystemDiagrams`. If it does not exist, start it with
-`tkt wiki cp templates/<Name> <Name>`. Read `agents/Home` and the page, then follow its
-*Conventions* and *Instructions*.
-
-These jobs have no natural end, so work in bounded passes:
-
-- With a focus (`/tkt map the serve lifecycle`), cover that focus. Without one, pick the most
-  useful gap: an empty section, the *Unknowns* list, or the area the conversation is about.
-- Stop after one substantial pass: about two sections, or one area explored in depth. Save
-  with `tkt wiki put <Name> --base <version>` before stopping.
-- Then report: what you added or changed, what is still missing, and the focus you suggest
-  for the next pass. Do not start that pass unasked.
 
 ## Before the first call
 
@@ -2718,44 +2505,24 @@ Each tracker has one server: a new `tkt serve`, from any terminal, stops the old
 - **What the human can do there:** file, edit, comment on, close, and reopen tickets.
   Blockers and parents are command-line only.
 
-## Wiki
-
-The tracker's wiki holds the project pages agents keep current. Start every wiki task at
-`agents/Home`: it lists the pages and the rules for them.
-
-| Intent | Command |
-| --- | --- |
-| List pages | `tkt wiki ls`, or `tkt wiki ls templates` |
-| Read a page | `tkt wiki get <page>`; stderr gives its version |
-| Write a page | `tkt wiki put <page> --base <version> <<'EOF'` ... |
-| Start a page from a template | `tkt wiki cp templates/<Name> <Name>` |
-| Retire a page | `tkt wiki rm <page> --base <version>` |
-
-- Always `get` before `put`, and pass the version it printed as `--base`, so a human's edit made
-  in between is never overwritten. When `put` reports the page changed, `get` it again and redo
-  the edit on the new text.
-- `put` replaces the whole page. Carry forward everything that still holds, including the
-  page's *Conventions* section.
-- Never write `agents/` pages, which humans own. `--force` exists for when the human asks.
-- Use `cp` only from `templates/`. Fill the copy in; leave the template as it is.
-
 ## Actions
 
 Project actions are commands the human can run from buttons in the web ui. `tkt action list`
 shows them; `tkt action run <name> [<id>]` runs one as its button does, streaming its log and
 exiting with its code. They need jq.
 
-- They come from the `actions` key of `.tkt.json` beside the tracker: json once its whole-line `//`
-  comments are dropped. Each is `{"name", "label", "icon", "command": [argv...], "comment"}`; `{ticket}`,
-  `{repo}`, and `{tkt}` (tkt's own path) are filled in, `icon` is a tabler icon name, and `comment: true`
-  posts the result to the ticket the run started from. The `config/Actions` wiki page is no longer read.
+- They come from the `actions` key of `.tkt/tkt.json` beside the tracker, or of an older `.tkt.json` there
+  when `.tkt/tkt.json` is missing: json once its whole-line `//` comments are dropped. Each is
+  `{"name", "label", "icon", "command": [argv...], "comment"}`; `{ticket}`, `{repo}`, and `{tkt}` (tkt's own
+  path) are filled in, `icon` is a tabler icon name, and `comment: true` posts the result to the ticket the
+  run started from. The `config/Actions` wiki page is no longer read.
 - `"skill": ["groom"]` instead of a command runs the top-level `agent` argv with its `{prompt}` set to
   `/tkt {ticket} groom`, so such a job may be you, running this skill.
 - An action whose command uses `{ticket}` is a ticket action and needs an id; any other is a
   project action, where an id is optional and only says which ticket gets the comment.
   `tkt action list` shows each one's scope.
 - Add or change actions only when the human asks: they run commands on their machine.
-  Never edit `.tkt.json` unasked.
+  Never edit the config file unasked.
 - `tkt action clean [--keep <n>]` retires old finished jobs to the temp dir; it deletes nothing.
 - Prefer an existing action over an ad-hoc command when it does what the human wants, so the
   run lands in the same job history the web ui shows.
@@ -2778,7 +2545,7 @@ put_skill() {
 # it never creates one, and says what it did either way
 init_skill() {
   local root agent dir found=
-  root=$(dirname "$REPO")
+  root=$PROJECT_DIR
   for agent in .claude .pi .agents; do
     [ -d "$root/$agent" ] || continue
     found=1
@@ -2797,9 +2564,10 @@ init_skill() {
 verb_skill() {
   local dir
   case "$1 $2" in
-    ' ') skill_md; return ;;
+    # printed in a project, with its plugins' sections; installed for every project, tkt's own part alone
+    ' ') locate; skill_md; return ;;
     'install ') dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/tkt ;;
-    'install --project') dir=$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/skills/tkt ;;
+    'install --project') locate; dir=$(project_root)/.claude/skills/tkt ;;
     *) die 'usage: tkt skill [install [--project]]' ;;
   esac
   [ ! -L "$dir" ] || die "$dir is a symlink; update the skill where it points instead"
@@ -2813,100 +2581,6 @@ verb_run() {
   fx "$@"
 }
 
-# wiki pages, for agents keeping the project's pages current. pages are markdown; a page emptied by rm is hidden
-# by fossil and treated as absent here. each page's latest version id lets put and rm refuse a stale write (--base)
-wiki_name() {
-  case "$1" in
-    '') die 'a page name is required' ;;
-    /*|*/|*//*) die "bad page name: $1" ;;
-    branch/*|tag/*|checkin/*) die "fossil reserves the ${1%%/*}/ prefix for its own notes; pick another name" ;;
-  esac
-}
-# the latest version of a page as 'uuid|mark', where mark is - for an emptied page; nothing when it never existed
-wiki_head() {
-  sqlq "select b.uuid || '|' || substr(e.comment,1,1) from event e join blob b on b.rid=e.objid where e.type='w' and substr(e.comment,2)=$(lit "$1") order by e.mtime desc, e.objid desc limit 1;"
-}
-wiki_exists() { local h; h=$(wiki_head "$1"); [ -n "$h" ] && [ "${h##*|}" != - ]; }
-wiki_version() { local h; h=$(wiki_head "$1"); h=${h%%|*}; printf '%s' "${h:0:10}"; }
-# a write needs --force for agents/ pages, which agents are told not to edit, and --base must match the latest version
-wiki_guard() {
-  local page=$1 base=$2 force=$3 cur
-  case "$page" in agents/*) [ -n "$force" ] || die "$page steers agents and is edited by humans; pass --force if you were asked to change it" ;; esac
-  [ -z "$base" ] && return 0
-  cur=$(wiki_version "$page")
-  case "$cur" in "$base"*) [ -n "$cur" ] && return 0 ;; esac
-  die "$page changed since version $base (now ${cur:-absent}); run tkt wiki show $page and redo the edit"
-}
-wiki_write() {
-  local f
-  f=$(mktemp)
-  printf '%s\n' "$2" >"$f"
-  if wiki_head "$1" | grep -q .; then fx wiki commit "$1" "$f" --mimetype text/x-markdown >/dev/null
-  else fx wiki create "$1" "$f" --mimetype text/x-markdown >/dev/null; fi
-  rm -f "$f"
-}
-wiki_usage() { die 'usage: tkt wiki ls|list [prefix] | get|show <page> | put <page> [--base <v>] [--force] | rm <page> [--base <v>] [--force] | cp|copy <page> <new-page> [--force]'; }
-
-verb_wiki() {
-  need
-  local sub=${1:-} page= dst= base= force= body cur
-  [ $# -eq 0 ] || shift
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --base) [ $# -ge 2 ] || wiki_usage; base=$2; shift 2 ;;
-      --base=*) base=${1#--base=}; shift ;;
-      --force) force=1; shift ;;
-      -*) wiki_usage ;;
-      *) if [ -z "$page" ]; then page=$1; elif [ -z "$dst" ]; then dst=$1; else wiki_usage; fi; shift ;;
-    esac
-  done
-  case "$sub" in
-    list|ls)
-      [ -z "$dst$base$force" ] || wiki_usage
-      local where='' pre=${page%/}
-      [ -z "$pre" ] || where="and (page=$(lit "$pre") or substr(page,1,$(( ${#pre} + 1 )))=$(lit "$pre/"))"
-      sqlq "with w as (select substr(comment,2) as page, comment, mtime, objid, row_number() over (partition by substr(comment,2) order by mtime desc, objid desc) as n from event where type='w')
-        select '| Page | Size | Updated |' || char(10) || '| --- | --- | --- |' union all
-        select * from (select '| ' || page || ' | ' || (select size from blob where rid=w.objid) || ' | ' || datetime(mtime) || ' |' from w where n=1 and comment not like '-%' $where order by page collate nocase);" | paint ;;
-    show|get)
-      [ -n "$page" ] && [ -z "$dst$base$force" ] || wiki_usage
-      wiki_name "$page"
-      wiki_exists "$page" || die "no wiki page $page; tkt wiki list shows them"
-      fx wiki export "$page"
-      note "$page is at version $(wiki_version "$page"); tkt wiki put $page --base $(wiki_version "$page") refuses if it changes first" ;;
-    put)
-      [ -n "$page" ] && [ -z "$dst" ] || wiki_usage
-      wiki_name "$page"
-      wiki_guard "$page" "$base" "$force"
-      body=$(slurp editor)
-      [ -n "$(printf '%s' "$body" | tr -d ' \t\n')" ] || die 'nothing on stdin; to retire a page use tkt wiki rm'
-      if wiki_exists "$page" && [ "$(fx wiki export "$page")" = "$body" ]; then note "$page is unchanged"; return; fi
-      if wiki_exists "$page"; then cur=updated; else cur=created; fi
-      wiki_write "$page" "$body"
-      note "$cur $page, now at version $(wiki_version "$page")" ;;
-    rm)
-      [ -n "$page" ] && [ -z "$dst" ] || wiki_usage
-      wiki_name "$page"
-      wiki_exists "$page" || die "no wiki page $page"
-      wiki_guard "$page" "$base" "$force"
-      local f; f=$(mktemp)
-      fx wiki commit "$page" "$f" --mimetype text/x-markdown >/dev/null
-      rm -f "$f"
-      note "removed $page; its history stays in fossil" ;;
-    copy|cp)
-      [ -n "$page" ] && [ -n "$dst" ] && [ -z "$base" ] || wiki_usage
-      wiki_name "$page"; wiki_name "$dst"
-      wiki_exists "$page" || die "no wiki page $page"
-      # copying is for starting a page from a template; any other copy is usually a rename gone wrong
-      case "$page" in templates/*) ;; *) [ -n "$force" ] || die "$page is not a template; copying it duplicates its content, so pass --force if that is what you want" ;; esac
-      ! wiki_exists "$dst" || die "$dst already exists; use tkt wiki put $dst to replace it"
-      case "$dst" in agents/*) [ -n "$force" ] || die "$dst steers agents and is edited by humans; pass --force if you were asked to create it" ;; esac
-      wiki_write "$dst" "$(fx wiki export "$page")"
-      note "copied $page to $dst, now at version $(wiki_version "$dst")" ;;
-    *) wiki_usage ;;
-  esac
-}
-
 # project actions: buttons that run project commands on the server, from fossil's /ext CGI, and the same runs
 # from the cli. each is configured as
 #   {"name": "a-z0-9-", "label": "Button text", "command": ["argv", "{ticket}"], "comment": true}
@@ -2916,32 +2590,37 @@ verb_wiki() {
 ACTION_TAIL=40
 TABLER_ICONS=https://cdn.jsdelivr.net/npm/@tabler/icons@3.19.0/icons/outline
 JOBS_KEEP=20
-# the wiki page actions were configured on before .tkt.json; no longer read, only named so its owner can move off it
+# the wiki page actions were configured on before the config file; no longer read, only named so its owner can move off it
 OLD_ACTIONS_PAGE=config/Actions
 
 have_jq() { command -v jq >/dev/null; }
 
-# actions live in .tkt.json beside the tracker, under its actions key. jq reads plain json, so whole-line // comments
+# actions live in the config file, .tkt/tkt.json (or an older .tkt.json beside the tracker), under its actions key. jq reads plain json, so whole-line // comments
 # are dropped first, json5-style, which lets the file explain itself; a // inside a value is left alone
-actions_file() { printf '%s/.tkt.json' "$(dirname "$REPO")"; }
-config_json() { sed -e '/^[[:space:]]*\/\//d' "$(actions_file)"; }
-config_ok() { [ -f "$(actions_file)" ] && config_json | jq -e 'type == "object"' >/dev/null 2>&1; }
+config_json() { sed -e '/^[[:space:]]*\/\//d' "$CONFIG_FILE"; }
+config_ok() { [ -f "$CONFIG_FILE" ] && config_json | jq -e 'type == "object"' >/dev/null 2>&1; }
 actions_json() {
-  [ -f "$(actions_file)" ] || return 0
-  if ! config_ok; then note "$(actions_file) is not valid json, even without its // comments, so there are no actions"; return 0; fi
+  [ -f "$CONFIG_FILE" ] || return 0
+  if ! config_ok; then note "$CONFIG_FILE is not valid json, even without its // comments, so there are no actions"; return 0; fi
+  # the actions are the top-level ones, then those of each installed plugin under plugins.<name>.actions, in
+  # plugin_list order; a plugin that is not installed contributes none. where two share a name, the first wins.
   # a skill action is shorthand for the agent running the tkt skill on the ticket: its words follow /tkt {ticket},
   # and that prompt fills the agent's {prompt}. without an agent that has one, a skill action is skipped
   config_json | jq '(.agent | if type == "array" and any(.[]; type == "string" and contains("{prompt}")) then map(tostring) else null end) as $agent
-    | [(.actions // [])[]? | if type == "object" and (.skill | type == "array") and (has("command") | not) then
+    | (.plugins // {}) as $p
+    | [((.actions // [])[]?), ($ARGS.positional[] as $n | ($p[$n].actions // [])[]?)
+      | if type == "object" and (.skill | type == "array") and (has("command") | not) then
         (if $agent then (["/tkt {ticket}"] + (.skill | map(tostring)) | join(" ")) as $p
           | . + {command: ($agent | map(gsub("\\{prompt\\}"; $p)))} else empty end)
-      else . end]'
+      else . end]
+    | reduce .[] as $a ([]; if (($a | type) == "object") and any(.[]; type == "object" and .name == $a.name) then . else . + [$a] end)' --args $(plugin_list)
 }
 
 # a tracker that still has the old wiki page is told once per listing, and by init, where its actions belong now
 old_actions_page() {
-  if wiki_exists "$OLD_ACTIONS_PAGE" 2>/dev/null; then
-    note "the $OLD_ACTIONS_PAGE wiki page is no longer read; move its actions into $(actions_file), then tkt wiki rm $OLD_ACTIONS_PAGE"
+  # plain fossil, since the wiki verb's helpers now belong to the wiki plugin; an emptied (retired) page does not count
+  if [ -n "$(fx wiki export "$OLD_ACTIONS_PAGE" 2>/dev/null)" ]; then
+    note "the $OLD_ACTIONS_PAGE wiki page is no longer read; move its actions into $CONFIG_FILE, then tkt wiki rm $OLD_ACTIONS_PAGE"
   fi
 }
 
@@ -2967,8 +2646,8 @@ default_config() {
 // a time per ticket. Any other is a project action: its button shows everywhere, and run from a ticket, that
 // ticket only says where a comment goes.
 //
-// Every run is a job, kept in .tkt.fossil.jobs/ with its command, log and exit code. Clean Jobs retires all but
-// the newest $JOBS_KEEP to \${TMPDIR:-/tmp}/tkt-jobs/, where nothing is deleted.
+// Every run is a job, kept in .tkt/jobs/ with its command, log and exit code. Clean Jobs retires every
+// finished one to \${TMPDIR:-/tmp}/tkt-jobs/, where nothing is deleted; --keep <n> would spare the newest n.
 //
 // skill   instead of command: the words of a tkt skill instruction, run by the agent on the ticket. ["groom"]
 //          makes the prompt "/tkt {ticket} groom", which fills {prompt} in the agent's argv; so a skill action is
@@ -2984,17 +2663,30 @@ default_config() {
 {
 //"agent": ["claude", "-p", "{prompt}", "--permission-mode", "dontAsk", "--allowedTools", "Bash(tkt:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob"],
   "actions": [
-    {"name": "clean-jobs", "label": "Clean Jobs", "icon": "archive", "command": ["tkt", "action", "clean", "--keep", "$JOBS_KEEP"]}
+    {"name": "clean-jobs", "label": "Clean Jobs", "icon": "archive", "command": ["tkt", "action", "clean", "--keep", "0"]}
   ]
 }
 EOF
 }
 
+# jobs were kept in $REPO.jobs before .tkt/; init moves them, once, so their history stays on the actions page
+old_paths() {
+  local old new
+  for old in "$REPO.jobs:$JOBS_DIR" "$REPO.ext:$EXT_DIR"; do
+    new=${old#*:}; old=${old%%:*}
+    [ -d "$old" ] && [ ! -e "$new" ] || continue
+    mkdir -p "$(dirname "$new")"
+    mv "$old" "$new"
+    note "moved $old to $new"
+  done
+}
+
 # init writes the default config only where there is none, and never touches one that exists
 init_config() {
-  if [ -e "$(actions_file)" ]; then return 0; fi
-  default_config >"$(actions_file)"
-  note "project actions: wrote $(actions_file), with Clean Jobs and the format in its comments"
+  if [ -e "$CONFIG_FILE" ]; then return 0; fi
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  default_config >"$CONFIG_FILE"
+  note "project actions: wrote $CONFIG_FILE, with Clean Jobs and the format in its comments"
 }
 
 # a ticket relates to a job in three ways, each with one rule:
@@ -3017,7 +2709,6 @@ action_line() { actions | awk -F'\t' -v n="$1" '$1 == n { print; exit }'; }
 action_scope() { action_line "$1" | cut -f4; }
 
 # a job is a directory beside the tracker: action, ticket, cmd (as run), pid, log, and exit once it ends
-jobs_dir() { printf '%s.jobs' "$REPO"; }
 
 job_running() { [ -f "$1/pid" ] && [ ! -f "$1/exit" ] && kill -0 "$(cat "$1/pid")" 2>/dev/null; }
 
@@ -3034,7 +2725,7 @@ job_state() {
 # job ids, newest first. ids sort by start time
 job_ids() {
   local d all=()
-  for d in "$(jobs_dir)"/*/; do [ -d "$d" ] && all+=("$(basename "$d")"); done
+  for d in "$JOBS_DIR"/*/; do [ -d "$d" ] && all+=("$(basename "$d")"); done
   [ ${#all[@]} -gt 0 ] || return 0
   printf '%s\n' "${all[@]}" | sort -r
 }
@@ -3044,7 +2735,7 @@ job_ids() {
 job_active() {
   local id dir
   while read -r id; do
-    dir=$(jobs_dir)/$id
+    dir=$JOBS_DIR/$id
     [ "$(cat "$dir/action")" = "$1" ] || continue
     if [ "$2" = ticket ] && [ "$(cat "$dir/ticket" 2>/dev/null)" != "$3" ]; then continue; fi
     if job_running "$dir"; then printf '%s' "$id"; return; fi
@@ -3075,7 +2766,7 @@ job_start() {
     cmd+=("${w//\{repo\}/$REPO}")
   done
   id=$(date +%Y%m%d-%H%M%S)-$$
-  dir=$(jobs_dir)/$id
+  dir=$JOBS_DIR/$id
   mkdir -p "$dir"
   printf '%s' "$name" >"$dir/action"
   printf '%s' "$tid" >"$dir/ticket"
@@ -3085,9 +2776,9 @@ job_start() {
   (
     set +e
     unset CONTENT_LENGTH CONTENT_TYPE QUERY_STRING REQUEST_METHOD PATH_INFO SCRIPT_NAME SCRIPT_FILENAME REQUEST_URI HTTP_REFERER HTTP_COOKIE
-    cd "$(dirname "$REPO")"
+    cd "$PROJECT_DIR"
     # TKT_JOB marks every tkt run inside the job, so an agent the action starts learns where it is from tkt itself
-    export PATH="$REPO.ext:$PATH" TKT_DB=$REPO TKT_JOB=$id TKT_ACTION=$name
+    export PATH="$EXT_DIR:$PATH" TKT_DB=$REPO TKT_JOB=$id TKT_ACTION=$name
     "${cmd[@]}" >"$dir/log" 2>&1 </dev/null
     rc=$?
     if [ "$flag" = comment ] && [ -z "$tid" ]; then
@@ -3109,7 +2800,7 @@ job_start() {
 action_usage() { die 'usage: tkt action list | run <name> [<id>] | clean [--keep <n>]'; }
 
 # where clean retires jobs: under the temp dir, one folder per project, so nothing is deleted and the os clears it
-jobs_retired_dir() { local t=${TMPDIR:-/tmp}; printf '%s/tkt-jobs/%s' "${t%/}" "$(basename "$(dirname "$REPO")")"; }
+jobs_retired_dir() { local t=${TMPDIR:-/tmp}; printf '%s/tkt-jobs/%s' "${t%/}" "$(basename "$PROJECT_DIR")"; }
 
 # retire every finished job but the newest keep: move each directory, its log and its record, out of the jobs list.
 # a running job stays, and so does the job doing the cleaning
@@ -3120,9 +2811,9 @@ jobs_clean() {
     i=$((i + 1))
     [ "$i" -gt "$keep" ] || continue
     [ "$id" != "${TKT_JOB:-}" ] || continue
-    [ "$(job_state "$(jobs_dir)/$id")" != running ] || continue
+    [ "$(job_state "$JOBS_DIR/$id")" != running ] || continue
     mkdir -p "$dest"
-    mv "$(jobs_dir)/$id" "$dest/"
+    mv "$JOBS_DIR/$id" "$dest/"
     n=$((n + 1))
   done < <(job_ids)
   if [ "$n" -gt 0 ]; then printf 'retired %s job(s) to %s; kept the newest %s\n' "$n" "$dest" "$keep"
@@ -3151,16 +2842,16 @@ verb_action() {
     list|ls)
       [ $# -le 1 ] || action_usage
       old_actions_page
-      if [ -f "$(actions_file)" ]; then note "actions from $(actions_file)"; else note "no $(actions_file), so no actions; tkt init writes a starting one"; fi
+      if [ -f "$CONFIG_FILE" ]; then note "actions from $CONFIG_FILE"; else note "no $CONFIG_FILE, so no actions; tkt init writes a starting one"; fi
       actions | awk -F'\t' 'BEGIN { print "| Action | Label | Icon | Scope | Comment | Command |"; print "| --- | --- | --- | --- | --- | --- |" }
         { c = $6; for (i = 7; i <= NF; i++) c = c " " $i; printf "| %s | %s | %s | %s | %s | `%s` |\n", $1, $2, ($5 == "-" ? "" : $5), $4, ($3 == "comment" ? "yes" : ""), c }' | paint ;;
     run)
       [ $# -ge 2 ] && [ $# -le 3 ] || action_usage
       local name=$2 tid= id dir state off=0 size
       if [ -n "${3:-}" ]; then tid=$(resolve "$3"); tid=${tid:0:10}; fi
-      [ -n "$(action_line "$name")" ] || die "no action named $name in $(actions_file); tkt action list shows them"
+      [ -n "$(action_line "$name")" ] || die "no action named $name in $CONFIG_FILE; tkt action list shows them"
       id=$(job_start "$name" "$tid")
-      dir=$(jobs_dir)/$id
+      dir=$JOBS_DIR/$id
       note "job $id: $(cat "$dir/cmd")"
       # stream the log as it grows, then whatever came after the job's last look
       while :; do
@@ -3181,7 +2872,7 @@ verb_action() {
   esac
 }
 
-# --- fossil's /ext CGI: tkt serve links $REPO.ext/tkt to this script and passes --extroot. routes, under /ext/tkt:
+# --- fossil's /ext CGI: tkt serve links $EXT_DIR/tkt to this script and passes --extroot. routes, under /ext/tkt:
 #   GET  /ext/tkt[?ticket=ID]     the actions and recent jobs; no trailing slash, which fossil refuses
 #   GET  /buttons?ticket=ID       the bare button row, unskinned, which the ticket page fetches into itself
 #   POST /run/<name>              start an action (form field: ticket), then redirect to its job
@@ -3194,11 +2885,12 @@ is_cgi() { [ $# -eq 0 ] && [ -n "${GATEWAY_INTERFACE:-}" ] && [ -n "${FOSSIL_REP
 cgi_env() {
   local home=
   unset GATEWAY_INTERFACE
-  case "$FOSSIL_REPOSITORY" in /*) REPO=$FOSSIL_REPOSITORY ;; *) REPO=$PWD/$FOSSIL_REPOSITORY ;; esac
+  # fossil gives the repository relative to our cwd
+  case "$FOSSIL_REPOSITORY" in /*) use_repo "$FOSSIL_REPOSITORY" ;; *) use_repo "$PWD/$FOSSIL_REPOSITORY" ;; esac
   # the server's own user's home, so actions find their tools' settings and logins (a claude, a git config); the
   # login name is plain text, which makes the eval safe. user-installed tools in ~/.local/bin come first on PATH
   eval "home=~$(id -un)" 2>/dev/null || true
-  case "$home" in /*) ;; *) home=$(dirname "$REPO") ;; esac
+  case "$home" in /*) ;; *) home=$PROJECT_DIR ;; esac
   export HOME=${HOME:-$home} TKT_DB=$REPO
   export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
   # USER is scrubbed too, and fossil needs one to write: the web user who pressed the button
@@ -3226,6 +2918,8 @@ cgi_page() {
   trap 'printf "</div>\n"' EXIT
 }
 cgi_fail() { cgi_page "$1" "$1"; printf '<p>%s</p>\n' "$(htmls "$2")"; exit 0; }
+# the same as plain text, for a reply a page's script reads rather than one the browser shows
+cgi_fail_text() { printf 'Status: %s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\n' "$1" "$2"; exit 0; }
 cgi_redirect() { printf 'Status: 303 See Other\r\nLocation: %s\r\n\r\n' "$1"; }
 
 # FOSSIL_NONCE is only the CSP nonce and fossil passes no Origin, so a POST must come from a page on this server
@@ -3244,11 +2938,13 @@ cgi_ticket() {
   TID=$1
 }
 
-# the button row: one form per action, posting the ticket along; nothing at all when there are no actions
+# the button row: one form per action, posting the ticket along; nothing at all when there are no actions.
+# with only=ticket, as on a ticket's own page, project actions are left out: they belong on the actions page
 buttons() {
-  local tid=$1 name label flag scope icon rest rows= text img
+  local tid=$1 only=${2:-} name label flag scope icon rest rows= text img
   while IFS=$'\t' read -r name label flag scope icon rest; do
     if [ "$scope" = ticket ] && [ -z "$tid" ]; then continue; fi
+    if [ "$scope" = project ] && [ "$only" = ticket ]; then continue; fi
     text=$(htmls "$(printf '%b' "$label")")
     img=
     # tabler icons come from the cdn rather than a mirror of the set, so this is the one thing on these pages that
@@ -3300,7 +2996,7 @@ route_index() {
   local id dir src tid when took
   cgi_ticket "${QUERY_STRING:-}"
   cgi_page 200 Actions
-  src="<a href=\"#config\"><code>.tkt.json</code></a>"
+  src="<a href=\"#config\"><code>$(htmls "$(basename "$CONFIG_FILE")")</code></a>"
   card_open tkt-card-actions "Actions <span class=\"tkt-card-meta\">from $src${TID:+ &middot; for ticket <a href=\"/tktview/$TID\">$TID</a>}</span>"
   if ! have_jq; then printf '<p><strong>Actions need jq</strong>, which is not on the server&rsquo;s PATH.</p>\n'
   elif [ -z "$(actions)" ]; then printf '<p>None yet. Add them to %s.</p>\n' "$src"
@@ -3320,7 +3016,7 @@ route_index() {
   else
     printf '<table class="report"><thead><tr><th>Job</th><th>Action</th><th>Ticket</th><th>Started</th><th>Took</th><th>State</th></tr></thead><tbody>\n'
     while read -r id; do
-      dir=$(jobs_dir)/$id
+      dir=$JOBS_DIR/$id
       tid=$(cat "$dir/ticket" 2>/dev/null || true)
       IFS=$'\t' read -r when took <<<"$(job_times "$dir")" || true
       printf '<tr><td><a href="%s/job/%s">%s</a></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n' \
@@ -3330,8 +3026,8 @@ route_index() {
     printf '</tbody></table>\n'
   fi
   card_close
-  card_open tkt-card-config "Config <span class=\"tkt-card-meta\" id=\"config\"><code>$(actions_file | html)</code></span>"
-  if [ -f "$(actions_file)" ]; then printf '<pre>%s</pre>\n' "$(html <"$(actions_file)")"
+  card_open tkt-card-config "Config <span class=\"tkt-card-meta\" id=\"config\"><code>$(htmls "$CONFIG_FILE")</code></span>"
+  if [ -f "$CONFIG_FILE" ]; then printf '<pre>%s</pre>\n' "$(html <"$CONFIG_FILE")"
   else printf '<p>No config yet; <code>tkt init</code> writes a starting one.</p>\n'; fi
   card_close
 }
@@ -3340,7 +3036,7 @@ route_index() {
 route_buttons() {
   cgi_ticket "${QUERY_STRING:-}"
   printf 'Content-Type: text/html; charset=utf-8\r\n\r\n'
-  buttons "$TID"
+  buttons "$TID" ticket
 }
 
 route_run() {
@@ -3359,7 +3055,7 @@ route_run() {
 route_job() {
   local id=$1 dir state full lines tid when took meta keep=200
   case "$id" in ''|*/*|.*) cgi_fail 400 "bad job id: $id" ;; esac
-  dir=$(jobs_dir)/$id
+  dir=$JOBS_DIR/$id
   [ -d "$dir" ] || cgi_fail 404 "no job $id"
   state=$(job_state "$dir")
   full=$(form_field full "${QUERY_STRING:-}")
@@ -3415,11 +3111,17 @@ main() {
     help|-h|--help) usage | paint_help; return ;;
     version|--version) printf 'tkt %s\n' "$TKT_VERSION"; return ;;
     skill) verb_skill "$@"; return ;;
-    init|new|show|list|search|todo|triage|edit|comment|tag|block|parent|set|close|clean|serve|stop|status|sql|wiki|action|run) ;;
-    *) usage >&2; die "unknown verb: $verb" ;;
+    init|new|show|list|search|todo|triage|edit|comment|tag|block|parent|set|close|clean|serve|stop|status|sql|action|run) ;;
+    *)
+      # any other verb naming an installed plugin runs that plugin, with TKT_DB set so it finds this same tracker
+      locate
+      if [ "$verb" != tkt ] && [ -f "$EXT_DIR/$verb/main" ] && [ -x "$EXT_DIR/$verb/main" ]; then
+        TKT_DB=$REPO exec "$EXT_DIR/$verb/main" "$@"
+      fi
+      usage >&2; die "unknown verb: $verb" ;;
   esac
   locate
   "verb_$verb" "$@"
 }
 
-main "$@"
+[ -n "$TKT_SOURCED" ] || main "$@"
