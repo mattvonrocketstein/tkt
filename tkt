@@ -2661,6 +2661,7 @@ default_config() {
 //
 // More, to copy into the list below:
 //   {"name": "test", "label": "Run tests", "icon": "player-play", "comment": true, "command": ["make", "test"]}
+//   {"name": "clean-tickets", "label": "Purge Closed", "icon": "trash", "command": ["tkt", "clean", "--force"]}
 //   {"name": "groom", "label": "Groom", "icon": "wand", "skill": ["groom"]}
 //   {"name": "review", "label": "Review", "icon": "eye-check", "skill": ["review"]}
 {

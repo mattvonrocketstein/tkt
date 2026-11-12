@@ -4,3 +4,4 @@ __pycache__/
 .tkt.fossil*
 .env
 docs/img/src-*/
+.claude/csop-state/
