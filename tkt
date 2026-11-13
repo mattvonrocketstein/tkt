@@ -1889,14 +1889,14 @@ plugin_menu() {
   config_json | jq -r "${entries[@]}" '
     def esc: tostring | @html | gsub("\\$"; "&#36;");
     (.plugins // {}) as $p | $ARGS.positional[] as $name | ($p[$name].menu // [])[]? | select(type == "object")
-    | (.label // $name | tostring) as $label
+    | (.label // $name | tostring) as $text
     | (.url // "/ext/tkt/ext/\($name)/\($ARGS.named[$name] // "main.sh")" | tostring) as $url
     | (.cap // "" | tostring | gsub("[^a-zA-Z0-9]"; "")) as $cap
     | (if $cap != "" then "<th1>enable_output [anycap \($cap)]</th1>" else "" end)
       + "<li class=\"tkt-menuicon tkt-plugmenu\" data-tkt-menu=\"\($name | esc)\"><a href=\""
       + (if $url | startswith("/") then "$home" else "" end) + ($url | esc)
-      + "\" aria-label=\"\(.tooltip // $label | esc)\">"
-      + (if .icon then "<span class=\"tkt-menumask\" aria-hidden=\"true\" style=\"--tkt-icon: url(&quot;$home/ext/tkt/ext/\($name | esc)/icons/\(.icon | esc).svg&quot;)\"></span>" else ($label | esc) end)
+      + "\" aria-label=\"\(.tooltip // $text | esc)\">"
+      + (if .icon then "<span class=\"tkt-menumask\" aria-hidden=\"true\" style=\"--tkt-icon: url(&quot;$home/ext/tkt/ext/\($name | esc)/icons/\(.icon | esc).svg&quot;)\"></span>" else ($text | esc) end)
       + "</a></li>"
       + (if $cap != "" then "<th1>enable_output 1</th1>" else "" end)' --args $(plugin_list)
 }

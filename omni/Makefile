@@ -66,7 +66,7 @@ die  = { printf '$(tty.red)tkt/omni $(strip $(1)) failed$(tty.off) %s\n' "$(stri
 show = printf '%-8s %-28s %-6s %s\n' '$(strip $(1))' '$(strip $(2))' \
          "$$(du -sh '$(strip $(2))' 2>/dev/null | cut -f1 || echo -)" '$(strip $(3))'
 
-.PHONY: tkt deps verify amk toolchain unpack build repack smoke stat clean help
+.PHONY: tkt deps verify amk toolchain unpack build repack smoke build.docker smoke.docker stat clean help
 .DEFAULT_GOAL := tkt
 
 help:
@@ -193,6 +193,40 @@ smoke: $(artifact)
 	  $(omni.run) skill | grep -qx '## Plugins' || $(call die, smoke, tkt did not find the plugins the binary carries); \
 	  [ ! -e .tkt/plugins ] || $(call die, smoke, plugins were copied into the project)
 	$(call log, smoke, passed)
+
+# The image: docker execs an entrypoint without the shell an ape needs, so the context holds an assimilated executable per arch; BuildKit is required, since the legacy builder leaves the target arch empty.
+docker.dir    := build/docker
+docker.arches := amd64 arm64
+docker.image  ?= tkt
+docker.tag    ?= $(lastword $(shell bash $(payload.script) version))
+assimilate.amd64 := -x
+assimilate.arm64 := -a
+# A scratch project mounted as the work tree and run as the caller, so what a run leaves is the caller's; each run starts a fresh home, so the payload's tools unpack from cold.
+docker.run = docker run --rm -i --user "$$(id -u):$$(id -g)" -e HOME=/tmp -e USER=tkt -v "$$t:/work" $(docker.image):$(docker.tag)
+
+build.docker: $(docker.dir)/.context
+	@# The image from the artifact make build lands, for this platform, tagged $(docker.image):$(docker.tag).
+	$(call log, build.docker, building $(docker.image):$(docker.tag) from $(docker.dir))
+	DOCKER_BUILDKIT=1 docker build -q -f $(HERE)Dockerfile --target tkt -t $(docker.image):$(docker.tag) $(docker.dir) >/dev/null
+	$(call log, build.docker, image $(docker.image):$(docker.tag) is ready -- $(docker.dir) is its context for every arch)
+$(docker.dir)/.context: $(artifact) $(cosmocc.dir)/bin/cosmocc
+	$(call log, build.docker, assimilating $(artifact) to an ELF for each of $(docker.arches))
+	rm -rf $(docker.dir) && mkdir -p $(addprefix $(docker.dir)/,$(docker.arches))
+	$(foreach a,$(docker.arches), \
+	  sh $(cosmocc.dir)/bin/assimilate -e $(assimilate.$(a)) -o $(docker.dir)/$(a)/tkt $(artifact) >/dev/null \
+	  && chmod 0755 $(docker.dir)/$(a)/tkt;)
+	touch $@
+
+smoke.docker: build.docker
+	@# The image against a scratch tracker mounted as its work tree: the version banner, then one ticket made and listed with the image's own fossil, bash and jq.
+	$(call log, smoke.docker, $(docker.image):$(docker.tag) against a scratch tracker)
+	t=$$(mktemp -d) && trap 'rm -rf "$$t"' EXIT; \
+	  [ "$$($(docker.run) version </dev/null)" = "$$(bash $(payload.script) version)" ] || $(call die, smoke.docker, version banner); \
+	  $(docker.run) init </dev/null >/dev/null 2>&1 \
+	  && echo body | $(docker.run) new title=smoke >/dev/null \
+	  && $(docker.run) list </dev/null | grep -q smoke \
+	  || $(call die, smoke.docker, scratch tracker round trip)
+	$(call log, smoke.docker, the image passes smoke)
 
 stat:
 	@# What is built here: the artifact and the inputs kept to stay incremental.

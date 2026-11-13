@@ -8,8 +8,16 @@ DOCS_REPO ?= mattvonrocketstein/tkt
 DOCS_PORT ?= 6419
 MDHEADERS = $(PYTHON) docs/tools/mdheaders.py --img $(DOCS_IMG)
 
-.PHONY: clean init test install install.slim docs docs.headers docs.check docs.test docs.serve omni omni.%
+VERSION ?=
+
+.PHONY: clean init test stamp install install.slim docs docs.headers docs.check docs.test docs.serve omni omni.%
 .SILENT:
+
+# stamp writes a release's version into the script, which ships as a release asset; the Release workflow runs it on its own checkout, never on the repository
+stamp:
+	[ -n "$(VERSION)" ] || { echo "tkt: stamp needs VERSION=X.Y.Z" >&2; exit 1; }
+	perl -pi -e 's/^TKT_VERSION=.*/TKT_VERSION=$(VERSION)/' tkt
+	[ "$$(bash ./tkt version)" = "tkt $(VERSION)" ] || { echo "tkt: the script does not report $(VERSION) after stamping" >&2; exit 1; }
 
 clean:
 	rm -rf .pytest_cache

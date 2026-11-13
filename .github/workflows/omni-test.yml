@@ -1,7 +1,12 @@
 # Test the tkt omni-pack.yml kept, never a fresh build: the suite with that binary as the tkt under test, on hosts that never built it and have no fossil of their own; dev.yml calls this.
 name: Omni test
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      # The version omni-pack.yml packed as, when the caller chose one; empty keeps the one in the script.
+      version:
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -15,6 +20,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      # The suite compares the binary with this checkout's script, so the script takes the same version the binary was packed with.
+      - name: Write the version into the script
+        if: inputs.version != ''
+        run: make stamp VERSION="${{ inputs.version }}"
       - name: Download tkt
         uses: actions/download-artifact@v8
         with:

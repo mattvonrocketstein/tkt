@@ -86,7 +86,7 @@ def template(tmp_path_factory):
 
 
 # a raw query through fossil, one value per column with a bar between: an older fossil quotes values unless told the mode
-SQL = ("run", "sql", "-list")
+SQL = ("run", "sql", "-list", "-separator", "|")
 
 
 class Tracker:

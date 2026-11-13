@@ -1,7 +1,12 @@
-# Copy this checkout's payload and the fossil omni-build.yml kept into the pinned amk, smoke the result, and keep it; dev.yml calls this, then omni-test.yml.
+# Copy this checkout's payload and the fossil omni-build.yml kept into the pinned amk, smoke the result and its image, and keep both; dev.yml and release.yml call this, then omni-test.yml.
 name: Omni pack
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      # The version to pack as, when the caller has chosen one; empty keeps the one in the script.
+      version:
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -11,6 +16,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      - name: Write the version into the script
+        if: inputs.version != ''
+        run: make stamp VERSION="${{ inputs.version }}"
       - name: Download fossil
         uses: actions/download-artifact@v8
         with:
@@ -40,5 +48,34 @@ jobs:
         with:
           name: tkt-omni
           path: omni/out/tkt
+          if-no-files-found: error
+          retention-days: 14
+      # The image needs one tool from cosmocc, which omni-build.yml left in the cache; a miss fetches it again.
+      - name: Restore the toolchain
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            omni/*.tar.gz
+            omni/*.zip
+            omni/*.ape
+            omni/cosmocc
+          key: omni-deps-${{ runner.os }}-${{ hashFiles('omni/Makefile') }}
+          restore-keys: |
+            omni-deps-${{ runner.os }}-
+      - name: Toolchain
+        run: make omni.toolchain
+      # The image is the same artifact assimilated per arch; smoke runs inside it, so this proves the amd64 half, and release.yml publishes both.
+      - name: Docker image
+        run: make -C omni -o build/fossil build.docker
+      - name: Smoke the image
+        run: make -C omni -o build/fossil smoke.docker
+      # A tarball, since upload-artifact drops the exec bits the context needs.
+      - name: Pack the image context
+        run: tar -C omni/build/docker -cf docker-context.tar amd64 arm64
+      - name: Upload the image context
+        uses: actions/upload-artifact@v7
+        with:
+          name: tkt-docker-context
+          path: docker-context.tar
           if-no-files-found: error
           retention-days: 14

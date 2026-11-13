@@ -1,7 +1,9 @@
 name: test
 
+# a push to main is a release, and release.yml calls this itself
 on:
   push:
+    branches-ignore: [ "main" ]
   pull_request:
   workflow_call: {}
 
