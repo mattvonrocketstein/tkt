@@ -2305,6 +2305,16 @@ verb_serve() {
   exec fossil server "$REPO" --port "$at" --localhost --localauth --extroot "$EXT_DIR"
 }
 
+# every descriptor above the standard three, closed: a shell can hand a child copies of its own output under high numbers
+close_inherited() {
+  local fd
+  for fd in /dev/fd/*; do
+    fd=${fd##*/}
+    case "$fd" in ''|*[!0123456789]*|0|1|2) continue ;; esac
+    eval "exec $fd>&-" 2>/dev/null || true
+  done
+}
+
 # serve, left running after this command returns; what serve said is shown only when the server does not come up
 verb_start() {
   need
@@ -2313,7 +2323,11 @@ verb_start() {
   url=http://localhost:$at/ticket
   read -r old port <<<"$(running)"
   err=$(mktemp)
-  TKT_DB=$REPO TKT_OPEN=0 nohup "$(self_path)" serve "port=$at" </dev/null >/dev/null 2>"$err" &
+  # the server outlives this command, so it must hold nothing a caller reads this command's output from
+  (
+    close_inherited
+    TKT_DB=$REPO TKT_OPEN=0 exec nohup "$(self_path)" serve "port=$at" </dev/null >/dev/null 2>"$err"
+  ) &
   child=$!
   while :; do
     read -r pid port <<<"$(running)"
