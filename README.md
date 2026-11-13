@@ -488,7 +488,7 @@ The suite drives the script's command-line interface against throwaway trackers,
 TKT_BASH=/bin/bash make test
 ```
 
-The GitHub workflow in `.github/workflows/test.yml` runs the same targets on Linux and macOS.
+The GitHub workflow in `.github/workflows/test.yml` runs the same targets on Linux.
 
 The skill lives in one place, inside `tkt`, in the `skill_core` function; `tkt skill` prints it. Edit it there. The script itself needs no build step.
 
