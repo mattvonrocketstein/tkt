@@ -7,6 +7,10 @@ on:
       version:
         type: string
         default: ''
+      # Whether to build and smoke the container image and keep its context; release.yml asks for it, dev.yml does not.
+      image:
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -52,6 +56,7 @@ jobs:
           retention-days: 14
       # The image needs one tool from cosmocc, which omni-build.yml left in the cache; a miss fetches it again.
       - name: Restore the toolchain
+        if: inputs.image
         uses: actions/cache/restore@v6
         with:
           path: |
@@ -63,16 +68,21 @@ jobs:
           restore-keys: |
             omni-deps-${{ runner.os }}-
       - name: Toolchain
+        if: inputs.image
         run: make omni.toolchain
       # The image is the same artifact assimilated per arch; smoke runs inside it, so this proves the amd64 half, and release.yml publishes both.
       - name: Docker image
+        if: inputs.image
         run: make -C omni -o build/fossil build.docker
       - name: Smoke the image
+        if: inputs.image
         run: make -C omni -o build/fossil smoke.docker
       # A tarball, since upload-artifact drops the exec bits the context needs.
       - name: Pack the image context
+        if: inputs.image
         run: tar -C omni/build/docker -cf docker-context.tar amd64 arm64
       - name: Upload the image context
+        if: inputs.image
         uses: actions/upload-artifact@v7
         with:
           name: tkt-docker-context

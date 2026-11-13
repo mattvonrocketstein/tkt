@@ -41,6 +41,7 @@ jobs:
     uses: ./.github/workflows/omni-pack.yml
     with:
       version: ${{ needs.version.outputs.version }}
+      image: true
 
   # Nothing publishes until the binary passes the same suite dev.yml runs.
   test:
